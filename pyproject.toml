@@ -63,9 +63,11 @@ select = [
     "TRY",  # tryceratops
     "UP",   # pyupgrade
 ]
+# Descriptive error messages are the point of ConfigError
+ignore = ["TRY003"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["ARG", "D", "S101"]
+"tests/*" = ["ARG", "D", "S101", "S108"]
 
 "src/agent_sandbox/cli.py" = ["PLC0415"]
 

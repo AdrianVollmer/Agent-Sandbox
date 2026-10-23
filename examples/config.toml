@@ -1,0 +1,47 @@
+# Copy to ~/.config/agent-sandbox/config.toml or /etc/agent-sandbox/config.toml
+
+# "podman" or "docker". Auto-detected (podman first) when unset.
+# engine = "podman"
+
+[agent]
+# Either an image name...
+image = "localhost/claude-code:latest"
+# ...or an inline Dockerfile. It is built once and tagged with a hash of its
+# content, so editing it triggers a rebuild. `run --rebuild` forces one.
+# The build context is empty, so COPY/ADD of local files won't work.
+# build = """
+# FROM docker.io/library/debian:trixie-slim
+# RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git \\
+#     && rm -rf /var/lib/apt/lists/*
+# RUN curl -fsSL https://claude.ai/install.sh | bash
+# ENV PATH=/root/.local/bin:$PATH
+# """
+# Default command when `agent-sandbox run` gets none. Unset means the image default.
+command = ["bash"]
+workdir = "/workspace"
+# Relative and ~ paths are resolved against the current directory and $HOME.
+# Bare names are named volumes and persist across runs.
+volumes = [".:/workspace:Z", "~/.claude:/root/.claude:Z"]
+# NAME=value sets a value, a bare NAME is copied from the host environment.
+env = [
+    "ANTHROPIC_API_KEY",
+    "TERM=xterm-256color",
+    # Skips optional telemetry and error reporting hosts the proxy would block anyway
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+]
+# Extra flags for `<engine> compose run`.
+run_args = []
+
+# Raw compose service keys, merged into the agent service.
+# networks, network_mode and depends_on are rejected since they would break isolation.
+[agent.service]
+cap_drop = ["ALL"]
+security_opt = ["no-new-privileges"]
+
+[proxy]
+# image = "docker.io/ubuntu/squid:latest"
+# port = 3128
+# Named domain lists for package registries, see `agent-sandbox presets`.
+presets = ["claude-code", "debian", "uv", "npm"]
+# Extra domains. A leading dot also allows all subdomains.
+# allowed_domains = ["example.com", ".example.org"]

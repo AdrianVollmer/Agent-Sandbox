@@ -1,0 +1,206 @@
+"""Loading and validating the TOML configuration."""
+
+import hashlib
+import logging
+import re
+import tomllib
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from agent_sandbox.presets import PRESETS
+
+log = logging.getLogger(__name__)
+
+APP_NAME = "agent-sandbox"
+CONFIG_FILENAME = "config.toml"
+SYSTEM_CONFIG_DIR = Path("/etc")
+DEFAULT_PROXY_IMAGE = "docker.io/ubuntu/squid:latest"
+BUILD_IMAGE_REPO = "localhost/agent-sandbox"
+ENGINES = ("podman", "docker")
+
+_DOMAIN_RE = re.compile(r"^\.?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]*[a-z0-9])?$", re.IGNORECASE)
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class ConfigError(Exception):
+    """Raised for missing or invalid configuration."""
+
+
+@dataclass(frozen=True)
+class ProxyConfig:
+    """Settings for the Squid sidecar that is the agent's only way out."""
+
+    allowed_domains: tuple[str, ...] = ()
+    presets: tuple[str, ...] = ()
+    image: str = DEFAULT_PROXY_IMAGE
+    port: int = 3128
+
+    def domains(self) -> tuple[str, ...]:
+        """Return the domains from all presets followed by the explicit ones."""
+        return (*(d for name in self.presets for d in PRESETS[name]), *self.allowed_domains)
+
+
+@dataclass(frozen=True)
+class AgentConfig:
+    """Settings for the container the agent runs in."""
+
+    image: str | None = None
+    build: str | None = None
+    command: tuple[str, ...] = ()
+    workdir: str | None = None
+    volumes: tuple[str, ...] = ()
+    env: tuple[str, ...] = ()
+    run_args: tuple[str, ...] = ()
+    service: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def image_ref(self) -> str:
+        """Return the image to run, a content-addressed tag when built from `build`."""
+        if self.image:
+            return self.image
+        assert self.build is not None  # noqa: S101 - guaranteed by _parse_agent
+        digest = hashlib.sha256(self.build.encode()).hexdigest()[:12]
+        return f"{BUILD_IMAGE_REPO}:{digest}"
+
+
+@dataclass(frozen=True)
+class Config:
+    """Top-level configuration."""
+
+    agent: AgentConfig
+    proxy: ProxyConfig
+    engine: str | None = None
+
+
+def config_search_paths(environ: Mapping[str, str]) -> list[Path]:
+    """Return candidate config files, highest priority first."""
+    xdg = environ.get("XDG_CONFIG_HOME", "")
+    # Per the XDG spec, relative paths are invalid and must be ignored
+    user_dir = Path(xdg) if xdg and Path(xdg).is_absolute() else Path(environ.get("HOME", "~")) / ".config"
+    return [user_dir / APP_NAME / CONFIG_FILENAME, SYSTEM_CONFIG_DIR / APP_NAME / CONFIG_FILENAME]
+
+
+def find_config(environ: Mapping[str, str]) -> Path:
+    """Return the first existing config file."""
+    candidates = config_search_paths(environ)
+    for path in candidates:
+        if path.is_file():
+            log.debug("Using config file %s", path)
+            return path
+        log.debug("No config file at %s", path)
+    searched = ", ".join(str(p) for p in candidates)
+    raise ConfigError(f"No config file found (searched: {searched})")
+
+
+def load_config(path: Path) -> Config:
+    """Read and validate a config file."""
+    try:
+        text = path.read_text()
+    except OSError as e:
+        raise ConfigError(f"Cannot read {path}: {e}") from e
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"{path}: invalid TOML: {e}") from e
+    return parse_config(data)
+
+
+def parse_config(data: Mapping[str, Any]) -> Config:
+    """Build a Config from parsed TOML data."""
+    _reject_unknown_keys(data, "", {"engine", "agent", "proxy"})
+    engine = _optional(data, "engine", str, "")
+    if engine is not None and engine not in ENGINES:
+        raise ConfigError(f"engine: must be one of {', '.join(ENGINES)}, got {engine!r}")
+    return Config(
+        agent=_parse_agent(_section(data, "agent")),
+        proxy=_parse_proxy(_section(data, "proxy")),
+        engine=engine,
+    )
+
+
+def _parse_agent(data: Mapping[str, Any]) -> AgentConfig:
+    prefix = "agent."
+    _reject_unknown_keys(
+        data, "agent", {"image", "build", "command", "workdir", "volumes", "env", "run_args", "service"}
+    )
+    env = _str_list(data, "env", prefix)
+    for entry in env:
+        if not _ENV_NAME_RE.match(entry.partition("=")[0]):
+            raise ConfigError(f"agent.env: invalid entry {entry!r}, expected NAME or NAME=value")
+    image = _optional(data, "image", str, prefix)
+    build = _optional(data, "build", str, prefix)
+    if bool(image) == bool(build):
+        raise ConfigError("agent: set exactly one of 'image' and 'build' (an inline Dockerfile)")
+    return AgentConfig(
+        image=image,
+        build=build,
+        command=_str_list(data, "command", prefix),
+        workdir=_optional(data, "workdir", str, prefix),
+        volumes=_str_list(data, "volumes", prefix),
+        env=env,
+        run_args=_str_list(data, "run_args", prefix),
+        service=_optional(data, "service", dict, prefix) or {},
+    )
+
+
+def _parse_proxy(data: Mapping[str, Any]) -> ProxyConfig:
+    prefix = "proxy."
+    _reject_unknown_keys(data, "proxy", {"image", "port", "allowed_domains", "presets"})
+    domains = _str_list(data, "allowed_domains", prefix)
+    presets = _str_list(data, "presets", prefix)
+    for preset in presets:
+        if preset not in PRESETS:
+            raise ConfigError(f"proxy.presets: unknown preset {preset!r} (available: {', '.join(sorted(PRESETS))})")
+    if not domains and not presets:
+        raise ConfigError(
+            "proxy.allowed_domains: must not be empty without presets, the agent would have no network access"
+        )
+    for domain in domains:
+        if not _DOMAIN_RE.match(domain):
+            raise ConfigError(f"proxy.allowed_domains: invalid domain {domain!r}")
+    port = _optional(data, "port", int, prefix)
+    if port is not None and not 1 <= port <= 65535:
+        raise ConfigError(f"proxy.port: must be between 1 and 65535, got {port}")
+    return ProxyConfig(
+        allowed_domains=domains,
+        presets=presets,
+        image=_optional(data, "image", str, prefix) or DEFAULT_PROXY_IMAGE,
+        port=port or ProxyConfig.port,
+    )
+
+
+_TYPE_NAMES: dict[type, str] = {str: "a string", int: "an integer", dict: "a table", list: "a list"}
+
+
+def _optional[T](data: Mapping[str, Any], key: str, kind: type[T], prefix: str) -> T | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    # bool is a subclass of int, but `port = true` is a mistake
+    if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+        raise ConfigError(f"{prefix}{key}: expected {_TYPE_NAMES[kind]}, got {type(value).__name__}")
+    return value
+
+
+def _str_list(data: Mapping[str, Any], key: str, prefix: str) -> tuple[str, ...]:
+    value = _optional(data, key, list, prefix) or []
+    if not all(isinstance(item, str) for item in value):
+        raise ConfigError(f"{prefix}{key}: expected a list of strings")
+    return tuple(value)
+
+
+def _section(data: Mapping[str, Any], name: str) -> Mapping[str, Any]:
+    if name not in data:
+        raise ConfigError(f"{name}: missing section [{name}]")
+    section = _optional(data, name, dict, "")
+    assert section is not None  # noqa: S101 - presence checked above
+    return section
+
+
+def _reject_unknown_keys(data: Mapping[str, Any], where: str, allowed: set[str]) -> None:
+    for key in data:
+        if key not in allowed:
+            label = where or "config"
+            raise ConfigError(f"{label}: unknown key {key!r} (allowed: {', '.join(sorted(allowed))})")

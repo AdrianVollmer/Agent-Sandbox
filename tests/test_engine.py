@@ -1,6 +1,6 @@
-import logging
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -43,30 +43,62 @@ class Recorder:
         return subprocess.CompletedProcess(args, self.returncodes.pop(0), stdout=self.stdout)
 
 
-def test_run_then_down() -> None:
+def test_run_returns_exit_code() -> None:
     project = ComposeProject(engine="podman", file=Path("/tmp/c.yaml"), name="sb")
-    recorder = Recorder([7, 0])
+    recorder = Recorder([7])
     code = project.run(run_args=("--user", "1000"), command=("bash",), runner=recorder)
     assert code == 7
     base = ["podman", "compose", "-f", "/tmp/c.yaml", "-p", "sb"]
-    assert recorder.calls == [
-        [*base, "run", "--rm", "--user", "1000", "agent", "bash"],
-        [*base, "down"],
-    ]
+    assert recorder.calls == [[*base, "run", "--rm", "--user", "1000", "agent", "bash"]]
 
 
-def test_down_runs_even_when_interrupted() -> None:
+def test_run_interrupted() -> None:
     project = ComposeProject(engine="docker", file=Path("/tmp/c.yaml"), name="sb")
-    calls: list[list[str]] = []
 
     def runner(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        calls.append(args)
-        if "run" in args:
-            raise KeyboardInterrupt
-        return subprocess.CompletedProcess(args, 0)
+        raise KeyboardInterrupt
 
     assert project.run(run_args=(), command=(), runner=runner) == 130
-    assert calls[-1][-1] == "down"
+
+
+def test_teardown_is_detached(tmp_path: Path) -> None:
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def spawn(args: list[str], **kwargs: Any) -> None:
+        calls.append((args, kwargs))
+
+    project = ComposeProject(engine="podman", file=tmp_path / "c.yaml", name="sb")
+    log_file = tmp_path / "state" / "teardown.log"
+    project.teardown_detached(log_file=log_file, cleanup=tmp_path / "work", spawn=spawn)
+    [(args, kwargs)] = calls
+    assert args[:2] == ["sh", "-c"]
+    assert "podman compose -f" in args[2]
+    assert " down -t 0" in args[2]
+    # Survives the terminal going away, e.g. Ctrl-C after we exit
+    assert kwargs["start_new_session"] is True
+    assert log_file.parent.is_dir()
+
+
+def test_teardown_script_logs_and_cleans_up(tmp_path: Path) -> None:
+    # Fake engine that prints its arguments and fails, like a broken `down`
+    engine = tmp_path / "fake-engine"
+    engine.write_text('#!/bin/sh\necho "called with: $*"\nexit 3\n')
+    engine.chmod(0o755)
+    work = tmp_path / "work dir"
+    work.mkdir()
+    (work / "compose.yaml").write_text("{}")
+    log_file = tmp_path / "state" / "teardown.log"
+    project = ComposeProject(engine=str(engine), file=work / "compose.yaml", name="sb")
+
+    process = project.teardown_detached(log_file=log_file, cleanup=work)
+    assert process is not None
+    process.wait(timeout=10)
+
+    log = log_file.read_text()
+    assert "sb" in log
+    assert f"called with: compose -f {work / 'compose.yaml'} -p sb down -t 0" in log
+    assert "exit code 3" in log
+    assert not work.exists()
 
 
 def test_ensure_image_skips_existing_image(tmp_path: Path) -> None:
@@ -91,23 +123,3 @@ def test_ensure_image_rebuild_skips_check(tmp_path: Path) -> None:
 def test_ensure_image_build_failure(tmp_path: Path) -> None:
     with pytest.raises(EngineError, match="exit code 2"):
         ensure_image("podman", "t:1", "FROM x\n", context=tmp_path, runner=Recorder([1, 2]))
-
-
-def test_down_output_is_captured_and_logged_at_debug(caplog: pytest.LogCaptureFixture) -> None:
-    # podman-compose down complains about the `run --rm` container being gone already
-    project = ComposeProject(engine="podman", file=Path("/tmp/c.yaml"), name="sb")
-    recorder = Recorder([0, 0], stdout='Error: no container with name or ID "sb_agent_1" found')
-    caplog.set_level(logging.DEBUG, logger="agent_sandbox")
-    project.run(run_args=(), command=(), runner=recorder)
-    down_kwargs = recorder.kwargs[-1]
-    assert down_kwargs["stdout"] == subprocess.PIPE
-    assert down_kwargs["stderr"] == subprocess.STDOUT
-    [record] = [r for r in caplog.records if "no container" in r.getMessage()]
-    assert record.levelno == logging.DEBUG
-
-
-def test_down_failure_is_logged_as_warning(caplog: pytest.LogCaptureFixture) -> None:
-    project = ComposeProject(engine="podman", file=Path("/tmp/c.yaml"), name="sb")
-    project.run(run_args=(), command=(), runner=Recorder([0, 1], stdout="boom"))
-    [record] = [r for r in caplog.records if "boom" in r.getMessage()]
-    assert record.levelno == logging.WARNING

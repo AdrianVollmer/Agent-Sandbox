@@ -8,6 +8,7 @@ import click
 
 if TYPE_CHECKING:
     from agent_sandbox.config import Config
+    from agent_sandbox.engine import ComposeProject
 
 _CONFIG_OPTION = click.option(
     "-c",
@@ -61,6 +62,32 @@ def _write_project(config: "Config", directory: Path) -> Path:
     return compose_file
 
 
+def _prepare_project(config: "Config", engine: str, *, rebuild: bool) -> "tuple[ComposeProject, Path]":
+    """Build the image if needed and write the project to a new temporary directory."""
+    import secrets
+    import shutil
+    import tempfile
+
+    from agent_sandbox import engine as engines
+
+    tmp = Path(tempfile.mkdtemp(prefix="agent-sandbox-"))
+    try:
+        if config.agent.build is not None:
+            # Separate empty context, the compose file may hold secrets
+            context = tmp / "build"
+            context.mkdir()
+            engines.ensure_image(engine, config.agent.image_ref, config.agent.build, context=context, rebuild=rebuild)
+        project = engines.ComposeProject(
+            engine=engine, file=_write_project(config, tmp), name=f"agent-sandbox-{secrets.token_hex(4)}"
+        )
+    except BaseException as e:
+        shutil.rmtree(tmp, ignore_errors=True)
+        if isinstance(e, engines.EngineError):
+            raise click.ClickException(str(e)) from e
+        raise
+    return project, tmp
+
+
 # Stop parsing our own options once the command starts, so its options
 # (e.g. `-c`) are passed on instead of being taken as ours
 @cli.command(context_settings={"allow_interspersed_args": False})
@@ -75,11 +102,10 @@ def run(config_path: Path | None, engine: str | None, rebuild: bool, command: tu
     is configured. Example: `agent-sandbox run claude --dangerously-skip-permissions`.
     """
     import logging
-    import secrets
-    import tempfile
+    import os
 
     from agent_sandbox import engine as engines
-    from agent_sandbox.config import ConfigError
+    from agent_sandbox.config import ConfigError, state_dir
 
     log = logging.getLogger("agent_sandbox.cli")
     config = _load(config_path)
@@ -89,24 +115,13 @@ def run(config_path: Path | None, engine: str | None, rebuild: bool, command: tu
     except ConfigError as e:
         raise click.UsageError(str(e)) from e
 
-    with tempfile.TemporaryDirectory(prefix="agent-sandbox-") as tmp:
-        if config.agent.build is not None:
-            # Separate empty context, the compose file may hold secrets
-            context = Path(tmp) / "build"
-            context.mkdir()
-            try:
-                engines.ensure_image(
-                    engine, config.agent.image_ref, config.agent.build, context=context, rebuild=rebuild
-                )
-            except engines.EngineError as e:
-                raise click.ClickException(str(e)) from e
-        project = engines.ComposeProject(
-            engine=engine,
-            file=_write_project(config, Path(tmp)),
-            name=f"agent-sandbox-{secrets.token_hex(4)}",
-        )
-        log.info("Starting %s with %s compose", project.name, engine)
+    project, tmp = _prepare_project(config, engine, rebuild=rebuild)
+    log.info("Starting %s with %s compose", project.name, engine)
+    try:
         code = project.run(run_args=config.agent.run_args, command=command)
+    finally:
+        # Deletes tmp once the project is down, so no context manager here
+        project.teardown_detached(log_file=state_dir(os.environ) / "teardown.log", cleanup=tmp)
     raise SystemExit(code)
 
 

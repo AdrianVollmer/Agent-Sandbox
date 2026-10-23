@@ -75,12 +75,24 @@ class Config:
     engine: str | None = None
 
 
+def _xdg_dir(environ: Mapping[str, str], variable: str, default: str) -> Path:
+    """Resolve an XDG base directory, falling back to `default` below $HOME."""
+    value = environ.get(variable, "")
+    # Per the XDG spec, relative paths are invalid and must be ignored
+    if value and Path(value).is_absolute():
+        return Path(value)
+    return Path(environ.get("HOME", "~")) / default
+
+
 def config_search_paths(environ: Mapping[str, str]) -> list[Path]:
     """Return candidate config files, highest priority first."""
-    xdg = environ.get("XDG_CONFIG_HOME", "")
-    # Per the XDG spec, relative paths are invalid and must be ignored
-    user_dir = Path(xdg) if xdg and Path(xdg).is_absolute() else Path(environ.get("HOME", "~")) / ".config"
+    user_dir = _xdg_dir(environ, "XDG_CONFIG_HOME", ".config")
     return [user_dir / APP_NAME / CONFIG_FILENAME, SYSTEM_CONFIG_DIR / APP_NAME / CONFIG_FILENAME]
+
+
+def state_dir(environ: Mapping[str, str]) -> Path:
+    """Return the directory for logs and other state."""
+    return _xdg_dir(environ, "XDG_STATE_HOME", ".local/state") / APP_NAME
 
 
 def find_config(environ: Mapping[str, str]) -> Path:

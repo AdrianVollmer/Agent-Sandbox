@@ -1,10 +1,12 @@
 """Building images and running the compose project with podman or docker."""
 
 import logging
+import shlex
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -68,25 +70,37 @@ class ComposeProject:
         return [self.engine, "compose", "-f", str(self.file), "-p", self.name, *args]
 
     def run(self, *, run_args: Sequence[str], command: Sequence[str], runner: Runner = subprocess.run) -> int:
-        """Run the agent interactively, then tear down the proxy and networks."""
+        """Run the agent interactively and return its exit code."""
         cmd = self._compose("run", "--rm", *run_args, AGENT_SERVICE, *command)
         log.debug("Running %s", cmd)
         try:
-            code = runner(cmd, check=False).returncode
+            return runner(cmd, check=False).returncode
         except KeyboardInterrupt:
             log.warning("Interrupted")
-            code = _EXIT_INTERRUPTED
-        finally:
-            self._down(runner)
-        return code
+            return _EXIT_INTERRUPTED
 
-    def _down(self, runner: Runner) -> None:
-        log.info("Tearing down project %s", self.name)
-        # podman-compose down reports the `run --rm` container as missing since
-        # it is already gone; keep that noise out unless something failed
-        down = runner(self._compose("down"), check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        output = (down.stdout or "").strip()
-        if down.returncode != 0:
-            log.warning("Teardown of %s failed (exit code %d):\n%s", self.name, down.returncode, output)
-        elif output:
-            log.debug("compose down output:\n%s", output)
+    def teardown_detached(self, *, log_file: Path, cleanup: Path, spawn: Callable[..., Any] = subprocess.Popen) -> Any:
+        """Remove the project in a background process, then delete `cleanup`.
+
+        The agent is gone at this point, so nobody needs to wait for this.
+        `down -t 0` kills the proxy right away, it holds no state worth a
+        graceful stop. Output, including podman-compose complaining about the
+        already removed `run --rm` container, goes to `log_file`.
+        """
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        script = (
+            f"{{ echo {shlex.quote(f'== {stamp} {self.name}')}; "
+            f"{shlex.join(self._compose('down', '-t', '0'))} "
+            '|| echo "teardown failed with exit code $?"; '
+            f"}} >> {shlex.quote(str(log_file))} 2>&1; "
+            f"rm -rf -- {shlex.quote(str(cleanup))}"
+        )
+        log.info("Tearing down %s in the background, log: %s", self.name, log_file)
+        return spawn(
+            ["sh", "-c", script],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )

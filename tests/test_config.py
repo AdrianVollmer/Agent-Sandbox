@@ -9,6 +9,7 @@ from agent_sandbox.config import (
     config_search_paths,
     find_config,
     load_config,
+    state_dir,
 )
 
 
@@ -191,3 +192,11 @@ def test_build_file_missing(write_config: Callable[..., Path]) -> None:
 def test_exactly_one_image_source(write_config: Callable[..., Path], agent: str) -> None:
     with pytest.raises(ConfigError, match=r"agent: set exactly one of 'image', 'build' and 'build_file'"):
         load_config(write_config(f'[agent]\n{agent}\n[proxy]\npresets = ["debian"]'))
+
+
+def test_state_dir_uses_xdg_state_home() -> None:
+    assert state_dir({"XDG_STATE_HOME": "/xdg", "HOME": "/home/u"}) == Path("/xdg/agent-sandbox")
+
+
+def test_state_dir_falls_back_to_home() -> None:
+    assert state_dir({"XDG_STATE_HOME": "relative", "HOME": "/home/u"}) == Path("/home/u/.local/state/agent-sandbox")

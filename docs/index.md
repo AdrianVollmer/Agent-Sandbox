@@ -16,10 +16,12 @@ HTTP proxy.
   so it has no route to the outside, and `HTTP_PROXY`/`HTTPS_PROXY` (plus
   lowercase variants) point at the proxy.
 
-The tool then runs `podman compose run --rm agent` (or `docker compose`) and
-tears the project down with `compose down` when the agent exits. Every
-invocation gets a random project name, so several sandboxes can run side by
-side.
+The tool then runs `podman compose run --rm agent` (or `docker compose`).
+When the agent exits, `compose down` removes the project in the background, so
+you get your prompt back right away; its output goes to
+`$XDG_STATE_HOME/agent-sandbox/teardown.log` (default `~/.local/state/...`).
+Every invocation gets a random project name, so several sandboxes can run side
+by side.
 
 ## Configuration
 

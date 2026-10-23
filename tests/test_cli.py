@@ -1,4 +1,5 @@
 import json
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -7,7 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from agent_sandbox.cli import cli
-from agent_sandbox.engine import ComposeProject
+from agent_sandbox.engine import ComposeProject, EngineError
 from tests.conftest import MINIMAL_CONFIG
 
 
@@ -27,7 +28,7 @@ def test_invalid_config_reports_error(write_config: Callable[..., Path]) -> None
 
 
 @pytest.fixture
-def fake_run(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+def fake_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
     seen: dict[str, Any] = {}
 
     def _run(self: ComposeProject, *, run_args: tuple[str, ...], command: tuple[str, ...]) -> int:
@@ -35,8 +36,17 @@ def fake_run(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         seen["compose"] = json.loads(self.file.read_text())
         return 3
 
+    def _teardown(self: ComposeProject, *, log_file: Path, cleanup: Path) -> None:
+        seen["teardown"] = {
+            "log_file": log_file,
+            "cleanup": cleanup,
+            "files": sorted(p.name for p in cleanup.iterdir()),
+        }
+
     monkeypatch.setattr("agent_sandbox.engine.ComposeProject.run", _run)
+    monkeypatch.setattr("agent_sandbox.engine.ComposeProject.teardown_detached", _teardown)
     monkeypatch.setattr("agent_sandbox.engine.shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     return seen
 
 
@@ -108,3 +118,38 @@ def test_run_with_image_does_not_build(
     monkeypatch.setattr("agent_sandbox.engine.ensure_image", lambda *_a, **_k: pytest.fail("should not build"))
     result = CliRunner().invoke(cli, ["run", "--config", str(write_config())])
     assert result.exit_code == 3, result.output
+
+
+def test_run_hands_temp_dir_to_teardown(
+    write_config: Callable[..., Path], fake_run: dict[str, Any], tmp_path: Path
+) -> None:
+    result = CliRunner().invoke(cli, ["run", "--config", str(write_config())])
+    assert result.exit_code == 3, result.output
+    teardown = fake_run["teardown"]
+    # The detached teardown needs the compose file and deletes the directory itself
+    assert "compose.yaml" in teardown["files"]
+    assert teardown["log_file"] == tmp_path / "state" / "agent-sandbox" / "teardown.log"
+
+
+def test_run_cleans_up_when_build_fails(
+    write_config: Callable[..., Path], fake_run: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created: list[Path] = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def mkdtemp(**kwargs: Any) -> str:
+        path = real_mkdtemp(**kwargs)
+        created.append(Path(path))
+        return path
+
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        raise EngineError("build broke")
+
+    monkeypatch.setattr("tempfile.mkdtemp", mkdtemp)
+    monkeypatch.setattr("agent_sandbox.engine.ensure_image", fail)
+    config = write_config('[agent]\nbuild = "FROM x"\n[proxy]\npresets = ["debian"]')
+    result = CliRunner().invoke(cli, ["run", "--config", str(config)])
+    assert result.exit_code == 1
+    assert "build broke" in result.output
+    assert created
+    assert not any(p.exists() for p in created)

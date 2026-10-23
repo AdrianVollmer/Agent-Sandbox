@@ -4,11 +4,13 @@
 # engine = "podman"
 
 [agent]
-# Either an image name...
+# Exactly one of `image`, `build_file` and `build`. Either an image name...
 image = "localhost/claude-code:latest"
-# ...or an inline Dockerfile. It is built once and tagged with a hash of its
-# content, so editing it triggers a rebuild. `run --rebuild` forces one.
-# The build context is empty, so COPY/ADD of local files won't work.
+# ...or a Dockerfile, as a path (relative to this file, ~ works) or inline.
+# It is built once and tagged with a hash of its content, so editing it
+# triggers a rebuild. `run --rebuild` forces one. The build context is empty,
+# so COPY/ADD of local files won't work.
+# build_file = "Dockerfile"
 # build = """
 # FROM docker.io/library/debian:trixie-slim
 # RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git \\

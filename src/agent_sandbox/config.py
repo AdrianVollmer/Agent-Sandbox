@@ -48,6 +48,7 @@ class AgentConfig:
 
     image: str | None = None
     build: str | None = None
+    build_file: Path | None = None
     command: tuple[str, ...] = ()
     workdir: str | None = None
     volumes: tuple[str, ...] = ()
@@ -104,26 +105,30 @@ def load_config(path: Path) -> Config:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: invalid TOML: {e}") from e
-    return parse_config(data)
+    return parse_config(data, base_dir=path.parent)
 
 
-def parse_config(data: Mapping[str, Any]) -> Config:
-    """Build a Config from parsed TOML data."""
+def parse_config(data: Mapping[str, Any], base_dir: Path | None = None) -> Config:
+    """Build a Config from parsed TOML data.
+
+    Relative paths in the config, such as `agent.build_file`, are resolved
+    against `base_dir`, normally the directory of the config file.
+    """
     _reject_unknown_keys(data, "", {"engine", "agent", "proxy"})
     engine = _optional(data, "engine", str, "")
     if engine is not None and engine not in ENGINES:
         raise ConfigError(f"engine: must be one of {', '.join(ENGINES)}, got {engine!r}")
     return Config(
-        agent=_parse_agent(_section(data, "agent")),
+        agent=_parse_agent(_section(data, "agent"), base_dir or Path.cwd()),
         proxy=_parse_proxy(_section(data, "proxy")),
         engine=engine,
     )
 
 
-def _parse_agent(data: Mapping[str, Any]) -> AgentConfig:
+def _parse_agent(data: Mapping[str, Any], base_dir: Path) -> AgentConfig:
     prefix = "agent."
     _reject_unknown_keys(
-        data, "agent", {"image", "build", "command", "workdir", "volumes", "env", "run_args", "service"}
+        data, "agent", {"image", "build", "build_file", "command", "workdir", "volumes", "env", "run_args", "service"}
     )
     env = _str_list(data, "env", prefix)
     for entry in env:
@@ -131,11 +136,23 @@ def _parse_agent(data: Mapping[str, Any]) -> AgentConfig:
             raise ConfigError(f"agent.env: invalid entry {entry!r}, expected NAME or NAME=value")
     image = _optional(data, "image", str, prefix)
     build = _optional(data, "build", str, prefix)
-    if bool(image) == bool(build):
-        raise ConfigError("agent: set exactly one of 'image' and 'build' (an inline Dockerfile)")
+    build_file_value = _optional(data, "build_file", str, prefix)
+    if sum(bool(v) for v in (image, build, build_file_value)) != 1:
+        raise ConfigError(
+            "agent: set exactly one of 'image', 'build' and 'build_file' (inline Dockerfile or path to one)"
+        )
+    build_file = None
+    if build_file_value:
+        build_file = base_dir / Path(build_file_value).expanduser()
+        try:
+            build = build_file.read_text()
+        except OSError as e:
+            raise ConfigError(f"agent.build_file: cannot read {build_file}: {e}") from e
+        log.debug("Read Dockerfile from %s", build_file)
     return AgentConfig(
         image=image,
         build=build,
+        build_file=build_file,
         command=_str_list(data, "command", prefix),
         workdir=_optional(data, "workdir", str, prefix),
         volumes=_str_list(data, "volumes", prefix),

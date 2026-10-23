@@ -159,10 +159,35 @@ def test_image_ref_is_image_when_set(write_config: Callable[..., Path]) -> None:
     assert load_config(write_config()).agent.image_ref == "localhost/agent:latest"
 
 
+def test_build_file_relative_to_config_dir(tmp_path: Path, write_config: Callable[..., Path]) -> None:
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images" / "Dockerfile").write_text("FROM debian\n")
+    inline = load_config(write_config('[agent]\nbuild = "FROM debian\\n"\n[proxy]\npresets = ["debian"]')).agent
+    agent = load_config(write_config('[agent]\nbuild_file = "images/Dockerfile"\n[proxy]\npresets = ["debian"]')).agent
+    assert agent.build == "FROM debian\n"
+    assert agent.build_file == tmp_path / "images" / "Dockerfile"
+    # Same content as inline, same image
+    assert agent.image_ref == inline.image_ref
+
+
+def test_build_file_expands_home(
+    tmp_path: Path, write_config: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "Dockerfile").write_text("FROM x\n")
+    agent = load_config(write_config('[agent]\nbuild_file = "~/Dockerfile"\n[proxy]\npresets = ["debian"]')).agent
+    assert agent.build == "FROM x\n"
+
+
+def test_build_file_missing(write_config: Callable[..., Path]) -> None:
+    with pytest.raises(ConfigError, match=r"agent\.build_file: cannot read .*nope"):
+        load_config(write_config('[agent]\nbuild_file = "nope"\n[proxy]\npresets = ["debian"]'))
+
+
 @pytest.mark.parametrize(
     "agent",
-    ['image = "i"\nbuild = "FROM x"', ""],
+    ['image = "i"\nbuild = "FROM x"', "", 'build = "FROM x"\nbuild_file = "Dockerfile"'],
 )
-def test_exactly_one_of_image_and_build(write_config: Callable[..., Path], agent: str) -> None:
-    with pytest.raises(ConfigError, match=r"agent: set exactly one of 'image' and 'build'"):
+def test_exactly_one_image_source(write_config: Callable[..., Path], agent: str) -> None:
+    with pytest.raises(ConfigError, match=r"agent: set exactly one of 'image', 'build' and 'build_file'"):
         load_config(write_config(f'[agent]\n{agent}\n[proxy]\npresets = ["debian"]'))

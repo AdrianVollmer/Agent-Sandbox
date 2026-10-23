@@ -1,0 +1,8 @@
+[project]
+site_name = "Agent Sandbox"
+nav = [
+  { "Home" = "index.md" },
+]
+
+[project.theme]
+language = "en"

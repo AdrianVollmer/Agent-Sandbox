@@ -1,0 +1,10 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+_commit: v0.1.1
+_src_path: https://github.com/AdrianVollmer/python-project-template.git
+author_email: dev@vllmr.org
+author_name: Adrian Vollmer
+is_app: true
+package_name: agent_sandbox
+project_description: Run an agent in a sandboxed environment
+project_name: Agent Sandbox
+with_web_frontend: false

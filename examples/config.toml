@@ -28,6 +28,7 @@ volumes = [".:/workspace:Z", "~/.claude:/root/.claude:Z"]
 env = [
     "ANTHROPIC_API_KEY",
     "TERM=xterm-256color",
+    "COLORTERM",
     # Skips optional telemetry and error reporting hosts the proxy would block anyway
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
 ]

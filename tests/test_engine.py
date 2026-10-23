@@ -1,3 +1,4 @@
+import logging
 import subprocess
 from pathlib import Path
 
@@ -30,13 +31,16 @@ def test_detect_engine_none_available() -> None:
 
 
 class Recorder:
-    def __init__(self, returncodes: list[int]) -> None:
+    def __init__(self, returncodes: list[int], stdout: str = "") -> None:
         self.calls: list[list[str]] = []
+        self.kwargs: list[dict[str, object]] = []
         self.returncodes = returncodes
+        self.stdout = stdout
 
-    def __call__(self, args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+    def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         self.calls.append(args)
-        return subprocess.CompletedProcess(args, self.returncodes.pop(0))
+        self.kwargs.append(kwargs)
+        return subprocess.CompletedProcess(args, self.returncodes.pop(0), stdout=self.stdout)
 
 
 def test_run_then_down() -> None:
@@ -87,3 +91,23 @@ def test_ensure_image_rebuild_skips_check(tmp_path: Path) -> None:
 def test_ensure_image_build_failure(tmp_path: Path) -> None:
     with pytest.raises(EngineError, match="exit code 2"):
         ensure_image("podman", "t:1", "FROM x\n", context=tmp_path, runner=Recorder([1, 2]))
+
+
+def test_down_output_is_captured_and_logged_at_debug(caplog: pytest.LogCaptureFixture) -> None:
+    # podman-compose down complains about the `run --rm` container being gone already
+    project = ComposeProject(engine="podman", file=Path("/tmp/c.yaml"), name="sb")
+    recorder = Recorder([0, 0], stdout='Error: no container with name or ID "sb_agent_1" found')
+    caplog.set_level(logging.DEBUG, logger="agent_sandbox")
+    project.run(run_args=(), command=(), runner=recorder)
+    down_kwargs = recorder.kwargs[-1]
+    assert down_kwargs["stdout"] == subprocess.PIPE
+    assert down_kwargs["stderr"] == subprocess.STDOUT
+    [record] = [r for r in caplog.records if "no container" in r.getMessage()]
+    assert record.levelno == logging.DEBUG
+
+
+def test_down_failure_is_logged_as_warning(caplog: pytest.LogCaptureFixture) -> None:
+    project = ComposeProject(engine="podman", file=Path("/tmp/c.yaml"), name="sb")
+    project.run(run_args=(), command=(), runner=Recorder([0, 1], stdout="boom"))
+    [record] = [r for r in caplog.records if "boom" in r.getMessage()]
+    assert record.levelno == logging.WARNING

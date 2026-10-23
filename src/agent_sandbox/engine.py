@@ -77,6 +77,16 @@ class ComposeProject:
             log.warning("Interrupted")
             code = _EXIT_INTERRUPTED
         finally:
-            log.info("Tearing down project %s", self.name)
-            runner(self._compose("down"), check=False, stdout=subprocess.DEVNULL)
+            self._down(runner)
         return code
+
+    def _down(self, runner: Runner) -> None:
+        log.info("Tearing down project %s", self.name)
+        # podman-compose down reports the `run --rm` container as missing since
+        # it is already gone; keep that noise out unless something failed
+        down = runner(self._compose("down"), check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        output = (down.stdout or "").strip()
+        if down.returncode != 0:
+            log.warning("Teardown of %s failed (exit code %d):\n%s", self.name, down.returncode, output)
+        elif output:
+            log.debug("compose down output:\n%s", output)

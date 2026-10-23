@@ -32,3 +32,10 @@ def test_render_does_not_log_to_std_streams() -> None:
     conf = render_squid_conf(ProxyConfig(allowed_domains=("example.com",)))
     assert "/dev/stdout" not in conf
     assert "/dev/stderr" not in conf
+
+
+def test_render_shuts_down_immediately() -> None:
+    # The default shutdown_lifetime of 30s outlasts podman's 10s stop timeout,
+    # so every teardown ended in SIGKILL
+    conf = render_squid_conf(ProxyConfig(allowed_domains=("example.com",)))
+    assert "shutdown_lifetime 0 seconds" in conf.splitlines()

@@ -49,4 +49,6 @@ http_access deny all
 
 cache deny all
 pid_filename none
+# Default waits 30s for clients, longer than podman's 10s stop timeout
+shutdown_lifetime 0 seconds
 """

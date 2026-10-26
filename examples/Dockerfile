@@ -1,5 +1,5 @@
 # Agent image with Claude Code, Codex, Hermes, Pi (pi.dev), OpenCode and Maki,
-# plus mise and toolchains for JavaScript/TypeScript, Rust, Go and C/C++.
+# plus uv, just, mise and toolchains for JavaScript/TypeScript, Rust, Go and C/C++.
 #
 # Reference it from the config (relative to the config file's directory):
 #
@@ -11,7 +11,7 @@
 #   env = ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"]
 #
 #   [proxy]
-#   presets = ["claude-code", "debian", "npm", "pypi", "rust", "go", "mise", "github"]
+#   presets = ["claude-code", "debian", "npm", "uv", "rust", "go", "mise", "github"]
 #   allowed_domains = ["api.openai.com"]  # plus whatever your model providers need
 #
 # The tool builds the image with an empty build context, which is fine since
@@ -37,7 +37,7 @@ ENV LANG=C.UTF-8 \
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         bash-completion ca-certificates curl wget git openssh-client gnupg \
-        less nano procps file unzip xz-utils zip jq ripgrep fd-find tree \
+        less nano procps file unzip xz-utils zip jq ripgrep fd-find tree just \
         python3 python3-venv python3-pip \
         build-essential pkg-config libssl-dev libatomic1 \
         clang clangd clang-format clang-tidy lldb lld \
@@ -54,6 +54,9 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack \
     && corepack enable \
     && node --version && npm --version
+
+# uv and uvx from the official image
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 # Agents distributed via npm. pi.dev recommends --ignore-scripts, Codex works
 # without them too.

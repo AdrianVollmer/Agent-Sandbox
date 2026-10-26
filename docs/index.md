@@ -55,6 +55,10 @@ Notes:
   the run.
 - Tools that ignore proxy environment variables will have no network access.
   That is intended.
+- Custom CA certificates (e.g. a TLS-inspecting corporate network) must be
+  trusted inside the agent container, since the proxy only tunnels HTTPS.
+  Mount the host CA bundle and set `NODE_EXTRA_CA_CERTS`/`REQUESTS_CA_BUNDLE`;
+  `examples/config.toml` has a commented example.
 - Images from `agent.build`/`agent.build_file` are built by the tool itself,
   with normal network access (not through the proxy), and tagged
   `localhost/agent-sandbox:<hash>`. Old tags are not cleaned up;

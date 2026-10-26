@@ -23,7 +23,15 @@ command = ["bash"]
 workdir = "/workspace"
 # Relative and ~ paths are resolved against the current directory and $HOME.
 # Bare names are named volumes and persist across runs.
-volumes = [".:/workspace:Z", "~/.claude:/root/.claude:Z"]
+volumes = [
+    ".:/workspace:Z",
+    "~/.claude:/root/.claude:Z",
+    # Host CA bundle, e.g. for a TLS-inspecting corporate network. Squid only
+    # tunnels HTTPS, so the agent's tools are the ones that must trust the CA.
+    # On Fedora/RHEL hosts the source is /etc/pki/tls/certs/ca-bundle.crt.
+    # No :Z/:z here, relabeling a system file breaks things on the host.
+    # "/etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro",
+]
 # NAME=value sets a value, a bare NAME is copied from the host environment.
 env = [
     "ANTHROPIC_API_KEY",
@@ -31,6 +39,10 @@ env = [
     "COLORTERM",
     # Skips optional telemetry and error reporting hosts the proxy would block anyway
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+    # With the CA bundle above: Node tools (Codex, Pi, OpenCode) and Python
+    # requests/pip use their own CA lists unless told otherwise.
+    # "NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt",
+    # "REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
 ]
 # Extra flags for `<engine> compose run`.
 run_args = []

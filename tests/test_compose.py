@@ -103,3 +103,21 @@ def test_compose_merges_raw_service_keys() -> None:
 def test_compose_rejects_service_keys_that_break_isolation(key: str) -> None:
     with pytest.raises(ConfigError, match=key):
         _build(_config(service={key: []}))
+
+
+def test_compose_pins_proxy_hosts() -> None:
+    compose = build_compose(
+        BASE,
+        squid_conf=Path("/tmp/x/squid.conf"),
+        environ={},
+        cwd=CWD,
+        home=HOME,
+        proxy_hosts={"ai.syss.intern": ["10.1.2.3", "10.1.2.4"]},
+    )
+    assert compose["services"][PROXY_SERVICE]["extra_hosts"] == ["ai.syss.intern:10.1.2.3", "ai.syss.intern:10.1.2.4"]
+    # The agent never resolves anything itself, everything goes through the proxy
+    assert "extra_hosts" not in compose["services"][AGENT_SERVICE]
+
+
+def test_compose_without_proxy_hosts_has_no_extra_hosts() -> None:
+    assert "extra_hosts" not in _build(BASE)["services"][PROXY_SERVICE]

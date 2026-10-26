@@ -50,8 +50,20 @@ def _write_project(config: "Config", directory: Path) -> Path:
 
     squid_conf = directory / "squid.conf"
     squid_conf.write_text(render_squid_conf(config.proxy))
+    proxy_hosts = None
+    if config.proxy.host_dns:
+        from agent_sandbox.hostdns import pinnable_names, resolve_on_host
+
+        proxy_hosts = resolve_on_host(pinnable_names(config.proxy))
     try:
-        compose = build_compose(config, squid_conf=squid_conf, environ=os.environ, cwd=Path.cwd(), home=Path.home())
+        compose = build_compose(
+            config,
+            squid_conf=squid_conf,
+            environ=os.environ,
+            cwd=Path.cwd(),
+            home=Path.home(),
+            proxy_hosts=proxy_hosts,
+        )
     except ConfigError as e:
         raise click.UsageError(str(e)) from e
     compose_file = directory / "compose.yaml"

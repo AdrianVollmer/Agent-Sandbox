@@ -39,3 +39,29 @@ def test_render_shuts_down_immediately() -> None:
     # so every teardown ended in SIGKILL
     conf = render_squid_conf(ProxyConfig(allowed_domains=("example.com",)))
     assert "shutdown_lifetime 0 seconds" in conf.splitlines()
+
+
+def test_render_allowed_ips_and_ports() -> None:
+    conf = render_squid_conf(
+        ProxyConfig(allowed_domains=("example.com",), allowed_ips=("10.0.0.0/8", "fd00::/8"), allowed_ports=(11434,))
+    )
+    lines = conf.splitlines()
+    assert "acl allowed_ips dst 10.0.0.0/8 fd00::/8" in lines
+    assert "http_access allow allowed_ips" in lines
+    assert lines.index("http_access allow allowed_ips") < lines.index("http_access deny all")
+    # Extra ports work for plain HTTP and for HTTPS via CONNECT
+    assert "acl Safe_ports port 80 443 11434" in lines
+    assert "acl SSL_ports port 443 11434" in lines
+
+
+def test_render_ips_only_has_no_empty_domain_acl() -> None:
+    # Squid refuses an ACL line without values
+    conf = render_squid_conf(ProxyConfig(allowed_ips=("192.168.178.10",)))
+    assert "dstdomain" not in conf
+    assert "http_access allow allowed_domains" not in conf
+    assert "acl allowed_ips dst 192.168.178.10" in conf.splitlines()
+
+
+def test_render_dedupes_default_ports() -> None:
+    conf = render_squid_conf(ProxyConfig(allowed_domains=("a.b",), allowed_ports=(443, 8443, 8443)))
+    assert "acl Safe_ports port 80 443 8443" in conf.splitlines()

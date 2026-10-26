@@ -27,24 +27,32 @@ def normalize_domains(domains: Iterable[str]) -> list[str]:
 
 
 def render_squid_conf(proxy: ProxyConfig) -> str:
-    """Return a squid.conf that only allows HTTP(S) to the allowlisted domains.
+    """Return a squid.conf that only allows HTTP(S) to the allowlisted destinations.
 
     Logs stay at the image defaults under /var/log/squid. Logging to
     /dev/stdout is not possible since Squid drops privileges before opening
     its log files and the unprivileged user cannot reopen the root-owned stream.
     """
-    domains = " ".join(normalize_domains(proxy.domains()))
+    ports = list(dict.fromkeys((443, *proxy.allowed_ports)))
+    # Squid rejects ACLs without values, so only define the ones in use
+    acls = []
+    if domains := normalize_domains(proxy.domains()):
+        acls.append(("allowed_domains", f"dstdomain {' '.join(domains)}"))
+    if proxy.allowed_ips:
+        acls.append(("allowed_ips", f"dst {' '.join(proxy.allowed_ips)}"))
+    acl_lines = "\n".join(f"acl {name} {spec}" for name, spec in acls)
+    allow_lines = "\n".join(f"http_access allow {name}" for name, _ in acls)
     return f"""\
 http_port {proxy.port}
 
-acl allowed_domains dstdomain {domains}
-acl SSL_ports port 443
-acl Safe_ports port 80 443
+{acl_lines}
+acl SSL_ports port {" ".join(map(str, ports))}
+acl Safe_ports port {" ".join(map(str, dict.fromkeys((80, *ports))))}
 acl CONNECT method CONNECT
 
 http_access deny !Safe_ports
 http_access deny CONNECT !SSL_ports
-http_access allow allowed_domains
+{allow_lines}
 http_access deny all
 
 cache deny all

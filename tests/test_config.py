@@ -200,3 +200,44 @@ def test_state_dir_uses_xdg_state_home() -> None:
 
 def test_state_dir_falls_back_to_home() -> None:
     assert state_dir({"XDG_STATE_HOME": "relative", "HOME": "/home/u"}) == Path("/home/u/.local/state/agent-sandbox")
+
+
+def test_allowed_ips_and_ports(write_config: Callable[..., Path]) -> None:
+    proxy = load_config(
+        write_config(
+            '[agent]\nimage = "i"\n[proxy]\n'
+            'allowed_ips = ["192.168.178.10", "10.0.0.0/8", "fd00::/8"]\nallowed_ports = [11434, 8080]'
+        )
+    ).proxy
+    # IPs alone are enough, no domains needed
+    assert proxy.allowed_ips == ("192.168.178.10", "10.0.0.0/8", "fd00::/8")
+    assert proxy.allowed_ports == (11434, 8080)
+
+
+@pytest.mark.parametrize(
+    ("proxy", "message"),
+    [
+        ('allowed_ips = ["192.168.1.300"]', r"proxy\.allowed_ips: invalid IP address or network '192\.168\.1\.300'"),
+        # Host bits set, almost certainly a typo for 10.0.0.0/8 or 10.1.2.3
+        ('allowed_ips = ["10.1.2.3/8"]', r"proxy\.allowed_ips: invalid IP address or network '10\.1\.2\.3/8'"),
+        ('allowed_ips = ["example.com"]', r"proxy\.allowed_ips: invalid IP address"),
+        ('presets = ["debian"]\nallowed_ports = [0]', r"proxy\.allowed_ports: must be between 1 and 65535, got 0"),
+        ('presets = ["debian"]\nallowed_ports = ["80"]', r"proxy\.allowed_ports: expected a list of integers"),
+        ('presets = ["debian"]\nallowed_ports = [true]', r"proxy\.allowed_ports: expected a list of integers"),
+        ("allowed_ports = [8080]", r"must not be empty without presets or allowed_ips"),
+    ],
+)
+def test_invalid_ips_and_ports(write_config: Callable[..., Path], proxy: str, message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        load_config(write_config(f'[agent]\nimage = "i"\n[proxy]\n{proxy}'))
+
+
+def test_host_dns(write_config: Callable[..., Path]) -> None:
+    assert load_config(write_config()).proxy.host_dns is False
+    config = write_config('[agent]\nimage = "i"\n[proxy]\npresets = ["debian"]\nhost_dns = true')
+    assert load_config(config).proxy.host_dns is True
+
+
+def test_host_dns_must_be_bool(write_config: Callable[..., Path]) -> None:
+    with pytest.raises(ConfigError, match=r"proxy\.host_dns: expected a boolean"):
+        load_config(write_config('[agent]\nimage = "i"\n[proxy]\npresets = ["debian"]\nhost_dns = "yes"'))

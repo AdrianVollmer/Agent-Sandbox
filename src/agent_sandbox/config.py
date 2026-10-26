@@ -1,6 +1,7 @@
 """Loading and validating the TOML configuration."""
 
 import hashlib
+import ipaddress
 import logging
 import re
 import tomllib
@@ -34,6 +35,11 @@ class ProxyConfig:
 
     allowed_domains: tuple[str, ...] = ()
     presets: tuple[str, ...] = ()
+    allowed_ips: tuple[str, ...] = ()
+    # Destination ports allowed in addition to 80 and 443
+    allowed_ports: tuple[int, ...] = ()
+    # Resolve allowed names on the host and pin them in the proxy's /etc/hosts
+    host_dns: bool = False
     image: str = DEFAULT_PROXY_IMAGE
     port: int = 3128
 
@@ -176,31 +182,47 @@ def _parse_agent(data: Mapping[str, Any], base_dir: Path) -> AgentConfig:
 
 def _parse_proxy(data: Mapping[str, Any]) -> ProxyConfig:
     prefix = "proxy."
-    _reject_unknown_keys(data, "proxy", {"image", "port", "allowed_domains", "presets"})
+    _reject_unknown_keys(
+        data, "proxy", {"image", "port", "allowed_domains", "presets", "allowed_ips", "allowed_ports", "host_dns"}
+    )
     domains = _str_list(data, "allowed_domains", prefix)
     presets = _str_list(data, "presets", prefix)
+    ips = _str_list(data, "allowed_ips", prefix)
     for preset in presets:
         if preset not in PRESETS:
             raise ConfigError(f"proxy.presets: unknown preset {preset!r} (available: {', '.join(sorted(PRESETS))})")
-    if not domains and not presets:
+    if not domains and not presets and not ips:
         raise ConfigError(
-            "proxy.allowed_domains: must not be empty without presets, the agent would have no network access"
+            "proxy.allowed_domains: must not be empty without presets or allowed_ips, "
+            "the agent would have no network access"
         )
     for domain in domains:
         if not _DOMAIN_RE.match(domain):
             raise ConfigError(f"proxy.allowed_domains: invalid domain {domain!r}")
+    for ip in ips:
+        try:
+            # strict: host bits set in a network (10.1.2.3/8) are most likely a typo
+            ipaddress.ip_network(ip, strict=True)
+        except ValueError as e:
+            raise ConfigError(f"proxy.allowed_ips: invalid IP address or network {ip!r}") from e
+    allowed_ports = _int_list(data, "allowed_ports", prefix)
+    for allowed_port in allowed_ports:
+        _check_port(allowed_port, f"{prefix}allowed_ports")
     port = _optional(data, "port", int, prefix)
-    if port is not None and not 1 <= port <= 65535:
-        raise ConfigError(f"proxy.port: must be between 1 and 65535, got {port}")
+    if port is not None:
+        _check_port(port, f"{prefix}port")
     return ProxyConfig(
         allowed_domains=domains,
         presets=presets,
+        allowed_ips=ips,
+        allowed_ports=allowed_ports,
+        host_dns=bool(_optional(data, "host_dns", bool, prefix)),
         image=_optional(data, "image", str, prefix) or DEFAULT_PROXY_IMAGE,
         port=port or ProxyConfig.port,
     )
 
 
-_TYPE_NAMES: dict[type, str] = {str: "a string", int: "an integer", dict: "a table", list: "a list"}
+_TYPE_NAMES: dict[type, str] = {bool: "a boolean", str: "a string", int: "an integer", dict: "a table", list: "a list"}
 
 
 def _optional[T](data: Mapping[str, Any], key: str, kind: type[T], prefix: str) -> T | None:
@@ -218,6 +240,19 @@ def _str_list(data: Mapping[str, Any], key: str, prefix: str) -> tuple[str, ...]
     if not all(isinstance(item, str) for item in value):
         raise ConfigError(f"{prefix}{key}: expected a list of strings")
     return tuple(value)
+
+
+def _int_list(data: Mapping[str, Any], key: str, prefix: str) -> tuple[int, ...]:
+    value = _optional(data, key, list, prefix) or []
+    # bool is a subclass of int, but `true` is not a port
+    if not all(isinstance(item, int) and not isinstance(item, bool) for item in value):
+        raise ConfigError(f"{prefix}{key}: expected a list of integers")
+    return tuple(value)
+
+
+def _check_port(port: int, label: str) -> None:
+    if not 1 <= port <= 65535:
+        raise ConfigError(f"{label}: must be between 1 and 65535, got {port}")
 
 
 def _section(data: Mapping[str, Any], name: str) -> Mapping[str, Any]:

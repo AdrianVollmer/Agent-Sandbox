@@ -2,7 +2,7 @@
 
 import logging
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -60,9 +60,18 @@ def resolve_env(entries: Iterable[str], environ: Mapping[str, str]) -> dict[str,
 
 
 def build_compose(
-    config: Config, *, squid_conf: Path, environ: Mapping[str, str], cwd: Path, home: Path
+    config: Config,
+    *,
+    squid_conf: Path,
+    environ: Mapping[str, str],
+    cwd: Path,
+    home: Path,
+    proxy_hosts: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
-    """Return the compose document as a dict."""
+    """Return the compose document as a dict.
+
+    `proxy_hosts` maps names to addresses pinned in the proxy's /etc/hosts.
+    """
     agent = config.agent
     bad_keys = _PROTECTED_SERVICE_KEYS & agent.service.keys()
     if bad_keys:
@@ -93,13 +102,17 @@ def build_compose(
         agent_service["volumes"] = volumes
     agent_service.update(agent.service)
 
+    proxy_service: dict[str, Any] = {
+        "image": config.proxy.image,
+        "volumes": [f"{squid_conf}:{SQUID_CONF_PATH}:ro,Z"],
+        "networks": ["internal", "egress"],
+    }
+    if proxy_hosts:
+        proxy_service["extra_hosts"] = [f"{name}:{ip}" for name, ips in proxy_hosts.items() for ip in ips]
+
     compose: dict[str, Any] = {
         "services": {
-            PROXY_SERVICE: {
-                "image": config.proxy.image,
-                "volumes": [f"{squid_conf}:{SQUID_CONF_PATH}:ro,Z"],
-                "networks": ["internal", "egress"],
-            },
+            PROXY_SERVICE: proxy_service,
             AGENT_SERVICE: agent_service,
         },
         "networks": {"internal": {"internal": True}, "egress": {}},

@@ -57,6 +57,14 @@ Notes:
   the run.
 - Tools that ignore proxy environment variables will have no network access.
   That is intended.
+- Besides domains, `proxy.allowed_ips` takes IP addresses and networks, and
+  `proxy.allowed_ports` opens destination ports beyond 80 and 443. To reach a
+  service on the host, allow `host.containers.internal` (podman) or the
+  host's bridge address, usually `172.17.0.1` (docker), plus its port.
+- If the host resolves names the containers can't (internal domains via VPN
+  or split DNS), set `proxy.host_dns = true`. The tool then resolves the
+  allowed names on the host at startup and pins them in the proxy's
+  `/etc/hosts`; wildcard entries can't be pinned.
 - Custom CA certificates (e.g. a TLS-inspecting corporate network) must be
   trusted inside the agent container, since the proxy only tunnels HTTPS.
   Mount the host CA bundle and set `NODE_EXTRA_CA_CERTS`/`REQUESTS_CA_BUNDLE`;

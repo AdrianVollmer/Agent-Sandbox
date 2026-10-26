@@ -55,8 +55,26 @@ security_opt = ["no-new-privileges"]
 
 [proxy]
 # image = "docker.io/ubuntu/squid:latest"
+# Port the proxy listens on (not a destination port, see allowed_ports)
 # port = 3128
 # Named domain lists for package registries, see `agent-sandbox presets`.
 presets = ["claude-code", "debian", "uv", "npm"]
 # Extra domains. A leading dot also allows all subdomains.
 # allowed_domains = ["example.com", ".example.org"]
+# IP addresses or networks (CIDR), for destinations without a name.
+# allowed_ips = ["192.168.178.10", "10.0.0.0/8"]
+# Destination ports allowed in addition to 80 and 443. They apply to every
+# allowed destination.
+# allowed_ports = [11434]
+#
+# To reach a service on the host, allow host.containers.internal (rootless
+# podman) as a domain plus the service's port. The host's LAN IP may not work
+# with rootless podman, since the container network can reuse that address.
+# allowed_domains = ["host.containers.internal"]
+
+# Resolve all allowed names (not wildcards) on the host at startup and pin the
+# addresses in the proxy's /etc/hosts. Use this when the host resolves names
+# the container can't, e.g. internal domains via VPN or split DNS. Addresses
+# stay fixed for the session; names that fail to resolve fall back to the
+# proxy's DNS.
+# host_dns = true

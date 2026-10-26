@@ -153,3 +153,15 @@ def test_run_cleans_up_when_build_fails(
     assert "build broke" in result.output
     assert created
     assert not any(p.exists() for p in created)
+
+
+def test_render_with_host_dns_pins_names(write_config: Callable[..., Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    def resolve(host: str, *_args: Any, **_kwargs: Any) -> list[tuple[Any, ...]]:
+        return [(2, 1, 6, "", ("10.1.2.3", 0))]
+
+    monkeypatch.setattr("agent_sandbox.hostdns.socket.getaddrinfo", resolve)
+    config = write_config('[agent]\nimage = "i"\n[proxy]\nallowed_domains = ["ai.syss.intern"]\nhost_dns = true')
+    result = CliRunner().invoke(cli, ["render", "--config", str(config)])
+    assert result.exit_code == 0, result.output
+    compose = json.loads(result.output.split("# squid.conf\n")[0].removeprefix("# compose.yaml\n"))
+    assert compose["services"]["proxy"]["extra_hosts"] == ["ai.syss.intern:10.1.2.3"]

@@ -1,5 +1,5 @@
-# Agent image with Claude Code, Codex, Hermes and Pi, plus mise and toolchains
-# for JavaScript/TypeScript, Rust, Go and C/C++.
+# Agent image with Claude Code, Codex, Hermes, Pi (pi.dev), OpenCode and Maki,
+# plus mise and toolchains for JavaScript/TypeScript, Rust, Go and C/C++.
 #
 # Reference it from the config (relative to the config file's directory):
 #
@@ -55,16 +55,17 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && corepack enable \
     && node --version && npm --version
 
-# Agents distributed via npm
+# Agents distributed via npm. pi.dev recommends --ignore-scripts, Codex works
+# without them too.
 # hadolint ignore=DL3016
-RUN npm install -g @openai/codex @earendil-works/pi-coding-agent \
+RUN npm install -g --ignore-scripts @openai/codex @earendil-works/pi-coding-agent \
     && npm cache clean --force
 
 # IS_SANDBOX=1 (undocumented) lets Claude Code use --dangerously-skip-permissions
 # as root. Updates happen by rebuilding the image, hence DISABLE_AUTOUPDATER.
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
-    PATH=/root/.local/share/mise/shims:/root/.local/bin:/usr/local/cargo/bin:/root/go/bin:$PATH \
+    PATH=/root/.local/share/mise/shims:/root/.local/bin:/root/.opencode/bin:/usr/local/cargo/bin:/root/go/bin:$PATH \
     GOTOOLCHAIN=auto \
     IS_SANDBOX=1 \
     DISABLE_AUTOUPDATER=1
@@ -91,6 +92,16 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
 RUN curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh \
         | bash -s -- --non-interactive \
     && command -v hermes
+
+# OpenCode 2, installs into ~/.opencode/bin. The npm package needs a blocked
+# postinstall.
+RUN curl -fsSL https://opencode.ai/v2/install | bash -s -- --no-modify-path \
+    && opencode --version
+
+# Maki, prebuilt binary from GitHub releases (the installer does not verify a
+# checksum)
+RUN curl -fsSL https://maki.sh/install.sh | MAKI_INSTALL_DIR=/usr/local/bin sh \
+    && command -v maki
 
 WORKDIR /workspace
 CMD ["bash"]

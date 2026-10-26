@@ -34,7 +34,7 @@ The config is TOML and is looked up in this order, first match wins:
 3. `/etc/agent-sandbox/config.toml`
 
 See [`examples/config.toml`](examples/config.toml) for all options. [`examples/Dockerfile`](examples/Dockerfile)
-builds an agent image with Claude Code, Codex, Hermes, Pi, mise and toolchains for
+builds an agent image with Claude Code, Codex, Hermes, Pi, OpenCode, Maki, mise and toolchains for
 JavaScript, Rust, Go and C/C++; its header shows the matching config. Unknown
 keys are rejected to catch typos.
 

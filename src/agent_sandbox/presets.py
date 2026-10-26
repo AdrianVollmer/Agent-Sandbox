@@ -17,6 +17,8 @@ PRESETS: dict[str, tuple[str, ...]] = {
     # uv fetches Python builds from GitHub releases (python-build-standalone)
     "uv": (*_PYPI, *_GITHUB_RELEASES, "astral.sh"),
     "npm": ("registry.npmjs.org", "registry.yarnpkg.com"),
+    # JavaScript Registry: jsr.io for Deno, npm.jsr.io for npm-compatible installs
+    "jsr": ("jsr.io", "npm.jsr.io"),
     "cargo": _CARGO,
     # rustup installer, toolchains, components and targets, plus crates
     "rust": (*_CARGO, "sh.rustup.rs", "static.rust-lang.org"),

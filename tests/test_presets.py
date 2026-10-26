@@ -55,3 +55,9 @@ def test_preset_covers_observed_hosts(preset: str, hosts: set[str]) -> None:
 
 def test_cargo_is_part_of_rust() -> None:
     assert set(PRESETS["cargo"]) <= set(PRESETS["rust"])
+
+
+def test_jsr_covers_deno_and_npm_compat_hosts() -> None:
+    # Deno fetches meta.json and modules from jsr.io, npm/pnpm/yarn get
+    # metadata and tarballs from npm.jsr.io (checked with curl, 2026-10-26)
+    assert set(PRESETS["jsr"]) == {"jsr.io", "npm.jsr.io"}

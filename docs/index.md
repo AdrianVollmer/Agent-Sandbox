@@ -44,7 +44,7 @@ agent-sandbox run claude --dangerously-skip-permissions
 agent-sandbox run --rebuild       # rebuild the image from the Dockerfile first
 agent-sandbox run --engine docker
 agent-sandbox render              # print compose file and squid.conf, run nothing
-agent-sandbox presets             # list domain presets (claude-code, debian, pypi, uv, npm, ...)
+agent-sandbox presets             # list domain presets (claude-code, debian, pypi, uv, npm, jsr, ...)
 agent-sandbox -v run              # debug logging
 ```
 

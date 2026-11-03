@@ -51,6 +51,13 @@ run_args = []
 # networks, network_mode and depends_on are rejected since they would break isolation.
 [agent.service]
 cap_drop = ["ALL"]
+# The minimum apt and dpkg need to install packages at runtime: switching to
+# the _apt user for downloads, opening its cache, and handing unpacked files
+# to other users while keeping setuid/setgid bits. With rootless podman these
+# only apply inside the container's user namespace. With rootful docker they
+# are real root powers over mounted host paths, so drop them if you don't
+# install packages at runtime.
+cap_add = ["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "SETUID", "SETGID"]
 security_opt = ["no-new-privileges"]
 
 [proxy]

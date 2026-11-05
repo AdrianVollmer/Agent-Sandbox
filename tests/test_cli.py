@@ -1,14 +1,18 @@
 import json
+import os
 import tempfile
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
+from click.shell_completion import CompletionItem, ShellComplete
 from click.testing import CliRunner
 
 from agent_sandbox.cli import cli
 from agent_sandbox.engine import ComposeProject, EngineError
+from agent_sandbox.session import Session, SessionRegistry
 from tests.conftest import MINIMAL_CONFIG
 
 
@@ -165,3 +169,164 @@ def test_render_with_host_dns_pins_names(write_config: Callable[..., Path], monk
     assert result.exit_code == 0, result.output
     compose = json.loads(result.output.split("# squid.conf\n")[0].removeprefix("# compose.yaml\n"))
     assert compose["services"]["proxy"]["extra_hosts"] == ["ai.syss.intern:10.1.2.3"]
+
+
+def test_run_registers_session_while_agent_runs(
+    write_config: Callable[..., Path], fake_run: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = SessionRegistry(tmp_path / "state" / "agent-sandbox" / "sessions")
+    during: list[Any] = []
+
+    def _run(self: ComposeProject, *, run_args: tuple[str, ...], command: tuple[str, ...]) -> int:
+        during.extend(registry.sessions())
+        fake_run["compose"] = json.loads(self.file.read_text())
+        return 0
+
+    monkeypatch.setattr("agent_sandbox.engine.ComposeProject.run", _run)
+    result = CliRunner().invoke(cli, ["run", "--config", str(write_config())])
+    assert result.exit_code == 0, result.output
+    [session] = during
+    assert session.cwd == Path.cwd()
+    assert session.allowlist.entries() == []
+    assert (
+        f"{session.allowlist.directory}:/etc/squid/agent-sandbox:ro,Z"
+        in fake_run["compose"]["services"]["proxy"]["volumes"]
+    )
+    assert registry.sessions() == []
+
+
+@pytest.fixture
+def live_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Session:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    session = Session(
+        name="agent-sandbox-abcd1234",
+        engine="podman",
+        directory=tmp_path / "work",
+        cwd=tmp_path,
+        pid=os.getpid(),
+        started=datetime(2026, 11, 5, 10, 0, tzinfo=UTC),
+    )
+    session.directory.mkdir()
+    session.allowlist.create()
+    SessionRegistry(tmp_path / "state" / "agent-sandbox" / "sessions").register(session)
+    return session
+
+
+@pytest.fixture
+def reloads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+    monkeypatch.setattr("agent_sandbox.engine.ComposeProject.reload_proxy", lambda self: calls.append(self.name))
+    return calls
+
+
+def test_allow_adds_exceptions_and_reloads(live_session: Session, reloads: list[str]) -> None:
+    result = CliRunner().invoke(cli, ["allow", "pypi.org", "10.0.0.0/8"])
+    assert result.exit_code == 0, result.output
+    assert live_session.allowlist.entries() == ["pypi.org", "10.0.0.0/8"]
+    assert reloads == ["agent-sandbox-abcd1234"]
+    assert "pypi.org" in result.output
+
+
+def test_allow_nothing_new_skips_reload(live_session: Session, reloads: list[str]) -> None:
+    live_session.allowlist.add(["pypi.org"])
+    result = CliRunner().invoke(cli, ["allow", "-s", "abcd1234", "pypi.org"])
+    assert result.exit_code == 0, result.output
+    assert reloads == []
+
+
+def test_allow_rejects_invalid_destination(live_session: Session, reloads: list[str]) -> None:
+    result = CliRunner().invoke(cli, ["allow", "pypi.org:443"])
+    assert result.exit_code == 2
+    assert "Invalid destination" in result.output
+    assert live_session.allowlist.entries() == []
+    assert reloads == []
+
+
+def test_allow_without_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    result = CliRunner().invoke(cli, ["allow", "pypi.org"])
+    assert result.exit_code == 1
+    assert "No running sessions" in result.output
+
+
+def test_allow_reports_reload_failure(live_session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(self: ComposeProject) -> None:
+        raise EngineError("Reloading the proxy failed: boom")
+
+    monkeypatch.setattr("agent_sandbox.engine.ComposeProject.reload_proxy", fail)
+    result = CliRunner().invoke(cli, ["allow", "pypi.org"])
+    assert result.exit_code == 1
+    assert "boom" in result.output
+
+
+def test_revoke_removes_exceptions_and_reloads(live_session: Session, reloads: list[str]) -> None:
+    live_session.allowlist.add(["pypi.org", "github.com"])
+    result = CliRunner().invoke(cli, ["revoke", "pypi.org", "nothere.com"])
+    assert result.exit_code == 0, result.output
+    assert live_session.allowlist.entries() == ["github.com"]
+    assert reloads == ["agent-sandbox-abcd1234"]
+    assert "nothere.com" in result.output
+
+
+def test_sessions_lists_running_sessions(live_session: Session) -> None:
+    live_session.allowlist.add(["pypi.org"])
+    result = CliRunner().invoke(cli, ["sessions"])
+    assert result.exit_code == 0, result.output
+    assert "abcd1234" in result.output
+    assert str(live_session.cwd) in result.output
+    assert "pypi.org" in result.output
+
+
+def test_sessions_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    result = CliRunner().invoke(cli, ["sessions"])
+    assert result.exit_code == 0
+    assert "No running sessions" in result.output
+
+
+ACCESS_LOG = """\
+1793872474.321 0 10.89.0.3 TCP_DENIED/403 3385 CONNECT pypi.org:443 - HIER_NONE/- text/html
+1793872475.321 0 10.89.0.3 TCP_DENIED/403 3385 CONNECT pypi.org:443 - HIER_NONE/- text/html
+1793872476.321 0 10.89.0.3 TCP_DENIED/403 3385 CONNECT github.com:443 - HIER_NONE/- text/html
+"""
+
+
+def test_blocked_lists_denials_not_allowed_since(live_session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("agent_sandbox.engine.ComposeProject.proxy_access_log", lambda self: ACCESS_LOG)
+    live_session.allowlist.add(["github.com"])
+    result = CliRunner().invoke(cli, ["blocked"])
+    assert result.exit_code == 0, result.output
+    [line] = [line for line in result.output.splitlines() if "pypi.org" in line]
+    assert line.split()[0] == "2"
+    assert "github.com" not in result.output
+
+
+def test_blocked_nothing(live_session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("agent_sandbox.engine.ComposeProject.proxy_access_log", lambda self: "")
+    result = CliRunner().invoke(cli, ["blocked"])
+    assert result.exit_code == 0
+    assert "Nothing blocked" in result.output
+
+
+def _complete(args: list[str], incomplete: str) -> list[CompletionItem]:
+    return ShellComplete(cli, {}, "agent-sandbox", "_AGENT_SANDBOX_COMPLETE").get_completions(args, incomplete)
+
+
+@pytest.mark.parametrize("command", ["allow", "revoke", "blocked"])
+def test_complete_session_ids(live_session: Session, command: str) -> None:
+    [item] = _complete([command, "--session"], "ab")
+    assert item.value == "abcd1234"
+    assert item.help == str(live_session.cwd)
+    assert _complete([command, "-s"], "zz") == []
+
+
+def test_complete_revoke_offers_current_exceptions(live_session: Session) -> None:
+    live_session.allowlist.add(["pypi.org", "github.com", "10.0.0.0/8"])
+    assert [i.value for i in _complete(["revoke"], "p")] == ["pypi.org"]
+    assert [i.value for i in _complete(["revoke", "-s", "abcd1234", "pypi.org"], "")] == ["github.com", "10.0.0.0/8"]
+
+
+def test_complete_revoke_without_matching_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Completion must stay quiet instead of failing in the user's shell
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    assert _complete(["revoke"], "") == []

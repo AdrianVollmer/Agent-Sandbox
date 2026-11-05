@@ -57,7 +57,7 @@ def test_render_allowed_ips_and_ports() -> None:
 def test_render_ips_only_has_no_empty_domain_acl() -> None:
     # Squid refuses an ACL line without values
     conf = render_squid_conf(ProxyConfig(allowed_ips=("192.168.178.10",)))
-    assert "dstdomain" not in conf
+    assert "acl allowed_domains" not in conf
     assert "http_access allow allowed_domains" not in conf
     assert "acl allowed_ips dst 192.168.178.10" in conf.splitlines()
 
@@ -65,3 +65,14 @@ def test_render_ips_only_has_no_empty_domain_acl() -> None:
 def test_render_dedupes_default_ports() -> None:
     conf = render_squid_conf(ProxyConfig(allowed_domains=("a.b",), allowed_ports=(443, 8443, 8443)))
     assert "acl Safe_ports port 80 443 8443" in conf.splitlines()
+
+
+def test_render_reads_dynamic_exceptions_from_files() -> None:
+    conf = render_squid_conf(ProxyConfig(allowed_domains=("example.com",)))
+    lines = conf.splitlines()
+    assert 'acl dynamic_domains dstdomain "/etc/squid/agent-sandbox/domains.txt"' in lines
+    assert 'acl dynamic_ips dst "/etc/squid/agent-sandbox/ips.txt"' in lines
+    for acl in ("dynamic_domains", "dynamic_ips"):
+        # After the port checks, so exceptions can't open other ports
+        assert lines.index("http_access deny CONNECT !SSL_ports") < lines.index(f"http_access allow {acl}")
+        assert lines.index(f"http_access allow {acl}") < lines.index("http_access deny all")

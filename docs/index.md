@@ -72,3 +72,35 @@ Notes:
   `localhost/agent-sandbox:<hash>`. Old tags are not cleaned up;
   `podman image prune` takes care of them.
 - The compose file is written as JSON, which compose parses as YAML.
+
+## Allowing destinations at runtime
+
+When the agent hits a blocked destination, you can open it for the running
+session from another terminal, without restarting:
+
+```sh
+agent-sandbox sessions                 # running sessions and their exceptions
+agent-sandbox blocked                  # what the proxy denied, newest first
+agent-sandbox allow pypi.org .pythonhosted.org
+agent-sandbox revoke pypi.org
+agent-sandbox allow -s 1a2b3c4d 10.0.0.5   # pick a session by its ID
+```
+
+Without `--session`, the commands act on the only running session, or on the
+only one started in the current directory.
+
+Shell completion covers session IDs and, for `revoke`, the session's current
+exceptions. Enable it with Click's mechanism, e.g. for bash:
+`eval "$(_AGENT_SANDBOX_COMPLETE=bash_source agent-sandbox)"` (`zsh_source`
+and `fish_source` work the same way).
+
+A destination is a domain (a leading dot includes subdomains), an IP address
+or a network. Exceptions last until the session ends; to keep one, add it to
+the config. They don't open extra ports, and with `proxy.host_dns` they are
+resolved by the proxy, not pinned.
+
+How it works: each session keeps its exceptions in files in its temporary
+directory, mounted read-only into the proxy. `allow` and `revoke` rewrite
+them and make Squid reload. Connections already open stay up, so `revoke`
+only stops new ones. Nothing in the agent container can reach these files or
+the commands, so the agent can't grant itself access.

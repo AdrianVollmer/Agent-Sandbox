@@ -7,6 +7,13 @@ from agent_sandbox.config import ProxyConfig
 
 log = logging.getLogger(__name__)
 
+# Where the session's dynamic exceptions are mounted, see agent_sandbox.allowlist
+DYNAMIC_DIR_PATH = "/etc/squid/agent-sandbox"
+DOMAINS_FILE = "domains.txt"
+IPS_FILE = "ips.txt"
+# The image default, read by `agent-sandbox blocked`
+ACCESS_LOG_PATH = "/var/log/squid/access.log"
+
 
 def normalize_domains(domains: Iterable[str]) -> list[str]:
     """Lowercase, dedupe, and drop domains already covered by a wildcard entry.
@@ -40,6 +47,9 @@ def render_squid_conf(proxy: ProxyConfig) -> str:
         acls.append(("allowed_domains", f"dstdomain {' '.join(domains)}"))
     if proxy.allowed_ips:
         acls.append(("allowed_ips", f"dst {' '.join(proxy.allowed_ips)}"))
+    # Files may be empty (Squid only warns), and are reread on reconfigure
+    acls.append(("dynamic_domains", f'dstdomain "{DYNAMIC_DIR_PATH}/{DOMAINS_FILE}"'))
+    acls.append(("dynamic_ips", f'dst "{DYNAMIC_DIR_PATH}/{IPS_FILE}"'))
     acl_lines = "\n".join(f"acl {name} {spec}" for name, spec in acls)
     allow_lines = "\n".join(f"http_access allow {name}" for name, _ in acls)
     return f"""\

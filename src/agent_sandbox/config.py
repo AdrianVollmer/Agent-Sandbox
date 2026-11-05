@@ -29,6 +29,19 @@ class ConfigError(Exception):
     """Raised for missing or invalid configuration."""
 
 
+def is_valid_domain(domain: str) -> bool:
+    """Return whether `domain` is a host name, optionally with a leading dot for subdomains."""
+    return bool(_DOMAIN_RE.match(domain))
+
+
+def parse_network(value: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network:
+    """Parse an IP address or network, raising ValueError for invalid ones.
+
+    Strict, since host bits set in a network (10.1.2.3/8) are most likely a typo.
+    """
+    return ipaddress.ip_network(value, strict=True)
+
+
 @dataclass(frozen=True)
 class ProxyConfig:
     """Settings for the Squid sidecar that is the agent's only way out."""
@@ -197,12 +210,11 @@ def _parse_proxy(data: Mapping[str, Any]) -> ProxyConfig:
             "the agent would have no network access"
         )
     for domain in domains:
-        if not _DOMAIN_RE.match(domain):
+        if not is_valid_domain(domain):
             raise ConfigError(f"proxy.allowed_domains: invalid domain {domain!r}")
     for ip in ips:
         try:
-            # strict: host bits set in a network (10.1.2.3/8) are most likely a typo
-            ipaddress.ip_network(ip, strict=True)
+            parse_network(ip)
         except ValueError as e:
             raise ConfigError(f"proxy.allowed_ips: invalid IP address or network {ip!r}") from e
     allowed_ports = _int_list(data, "allowed_ports", prefix)

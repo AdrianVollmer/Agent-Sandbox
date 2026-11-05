@@ -67,7 +67,8 @@ select = [
 ignore = ["TRY003"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["ARG", "D", "S101", "S108"]
+# S603/S607: tests run shell snippets with the system sh
+"tests/*" = ["ARG", "D", "S101", "S108", "S603", "S607"]
 
 "src/agent_sandbox/cli.py" = ["PLC0415"]
 

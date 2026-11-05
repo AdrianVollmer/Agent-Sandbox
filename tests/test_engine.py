@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from agent_sandbox.config import ConfigError
-from agent_sandbox.engine import ComposeProject, EngineError, detect_engine, ensure_image
+from agent_sandbox.engine import ComposeProject, EngineError, detect_engine, ensure_image, reload_script
 
 
 def test_detect_engine_prefers_podman() -> None:
@@ -123,3 +123,48 @@ def test_ensure_image_rebuild_skips_check(tmp_path: Path) -> None:
 def test_ensure_image_build_failure(tmp_path: Path) -> None:
     with pytest.raises(EngineError, match="exit code 2"):
         ensure_image("podman", "t:1", "FROM x\n", context=tmp_path, runner=Recorder([1, 2]))
+
+
+BASE_CMD = ["podman", "compose", "-f", "/tmp/c.yaml", "-p", "sb"]
+
+
+def test_reload_proxy_signals_squid_via_exec() -> None:
+    project = ComposeProject(engine="podman", file=Path("/tmp/c.yaml"), name="sb")
+    recorder = Recorder([0])
+    project.reload_proxy(runner=recorder)
+    [call] = recorder.calls
+    assert call[:9] == [*BASE_CMD, "exec", "-T", "proxy"]
+    assert call[9:11] == ["sh", "-c"]
+    assert recorder.kwargs[0]["capture_output"] is True
+
+
+def test_reload_proxy_failure_raises() -> None:
+    project = ComposeProject(engine="podman", file=Path("/tmp/c.yaml"), name="sb")
+    with pytest.raises(EngineError, match="Reloading the proxy failed"):
+        project.reload_proxy(runner=Recorder([1]))
+
+
+def test_proxy_access_log() -> None:
+    project = ComposeProject(engine="podman", file=Path("/tmp/c.yaml"), name="sb")
+    recorder = Recorder([0], stdout="line\n")
+    assert project.proxy_access_log(runner=recorder) == "line\n"
+    assert recorder.calls == [[*BASE_CMD, "exec", "-T", "proxy", "cat", "/var/log/squid/access.log"]]
+
+
+def test_reload_script_signals_every_squid_process(tmp_path: Path) -> None:
+    # Run the real script against a fake /proc with dash-compatible sh
+    proc = tmp_path / "proc"
+    for pid, comm in [(1, "squid"), (7, "log_file_daemon"), (9, "squid"), (12, "sh")]:
+        (proc / str(pid)).mkdir(parents=True)
+        (proc / str(pid) / "comm").write_text(f"{comm}\n")
+    script = reload_script(proc=str(proc)).replace("kill -HUP", "echo")
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert sorted(result.stdout.split()) == ["1", "9"]
+
+
+def test_reload_script_fails_without_squid(tmp_path: Path) -> None:
+    (tmp_path / "proc" / "1").mkdir(parents=True)
+    result = subprocess.run(["sh", "-c", reload_script(proc=str(tmp_path / "proc"))], capture_output=True, check=False)
+    assert result.returncode == 1
+    assert b"no squid process" in result.stderr

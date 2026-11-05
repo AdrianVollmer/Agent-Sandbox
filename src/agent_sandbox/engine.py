@@ -10,8 +10,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from agent_sandbox.compose import AGENT_SERVICE
+from agent_sandbox.compose import AGENT_SERVICE, PROXY_SERVICE
 from agent_sandbox.config import ENGINES, ConfigError
+from agent_sandbox.squid import ACCESS_LOG_PATH
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +24,24 @@ _EXIT_INTERRUPTED = 130
 
 class EngineError(Exception):
     """Raised when a container engine command fails."""
+
+
+def reload_script(proc: str = "/proc") -> str:
+    """Return a POSIX sh script that sends SIGHUP (reconfigure) to every Squid process.
+
+    Scanning /proc instead of `squid -k reconfigure` or signaling PID 1 avoids
+    depending on a PID file (we disable it) or on how the image starts Squid.
+    Only shell builtins are used, so it works in minimal images.
+    """
+    return (
+        "n=0; "
+        f"for d in {proc}/[0-9]*; do "
+        'read -r c < "$d/comm" 2>/dev/null || continue; '
+        '[ "$c" = squid ] || continue; '
+        'kill -HUP "${d##*/}" && n=$((n + 1)); '
+        "done; "
+        '[ "$n" -gt 0 ] || { echo "no squid process found" >&2; exit 1; }'
+    )
 
 
 def detect_engine(preferred: str | None, which: Callable[[str], str | None] | None = None) -> str:
@@ -78,6 +97,34 @@ class ComposeProject:
         except KeyboardInterrupt:
             log.warning("Interrupted")
             return _EXIT_INTERRUPTED
+
+    def exec(self, service: str, command: Sequence[str], *, runner: Runner = subprocess.run) -> str:
+        """Run `command` in the running `service` container and return its stdout."""
+        cmd = self._compose("exec", "-T", service, *command)
+        log.debug("Running %s", cmd)
+        result = runner(cmd, check=False, capture_output=True, text=True)
+        if result.returncode != 0:
+            detail = (result.stderr or "").strip() or f"exit code {result.returncode}"
+            raise EngineError(detail)
+        return result.stdout
+
+    def reload_proxy(self, *, runner: Runner = subprocess.run) -> None:
+        """Make Squid reread its configuration, including the dynamic exceptions.
+
+        Open connections, including HTTPS tunnels, survive this.
+        """
+        try:
+            self.exec(PROXY_SERVICE, ["sh", "-c", reload_script()], runner=runner)
+        except EngineError as e:
+            raise EngineError(f"Reloading the proxy failed: {e}") from e
+        log.debug("Reloaded the proxy of %s", self.name)
+
+    def proxy_access_log(self, *, runner: Runner = subprocess.run) -> str:
+        """Return the proxy's access log."""
+        try:
+            return self.exec(PROXY_SERVICE, ["cat", ACCESS_LOG_PATH], runner=runner)
+        except EngineError as e:
+            raise EngineError(f"Reading the proxy's access log failed: {e}") from e
 
     def teardown_detached(self, *, log_file: Path, cleanup: Path, spawn: Callable[..., Any] = subprocess.Popen) -> Any:
         """Remove the project in a background process, then delete `cleanup`.

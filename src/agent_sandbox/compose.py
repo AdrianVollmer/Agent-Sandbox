@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_sandbox.config import Config, ConfigError
+from agent_sandbox.squid import DYNAMIC_DIR_PATH
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ def build_compose(
     config: Config,
     *,
     squid_conf: Path,
+    dynamic_dir: Path,
     environ: Mapping[str, str],
     cwd: Path,
     home: Path,
@@ -70,7 +72,9 @@ def build_compose(
 ) -> dict[str, Any]:
     """Return the compose document as a dict.
 
-    `proxy_hosts` maps names to addresses pinned in the proxy's /etc/hosts.
+    `dynamic_dir` holds the exceptions added while the session runs, see
+    agent_sandbox.allowlist. `proxy_hosts` maps names to addresses pinned in
+    the proxy's /etc/hosts.
     """
     agent = config.agent
     bad_keys = _PROTECTED_SERVICE_KEYS & agent.service.keys()
@@ -104,7 +108,8 @@ def build_compose(
 
     proxy_service: dict[str, Any] = {
         "image": config.proxy.image,
-        "volumes": [f"{squid_conf}:{SQUID_CONF_PATH}:ro,Z"],
+        # A directory, since the files in it are replaced, which single file mounts would not follow
+        "volumes": [f"{squid_conf}:{SQUID_CONF_PATH}:ro,Z", f"{dynamic_dir}:{DYNAMIC_DIR_PATH}:ro,Z"],
         "networks": ["internal", "egress"],
     }
     if proxy_hosts:

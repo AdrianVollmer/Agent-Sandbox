@@ -54,7 +54,9 @@ def _config(**agent: Any) -> Config:
 
 
 def _build(config: Config) -> dict[str, Any]:
-    return build_compose(config, squid_conf=Path("/tmp/x/squid.conf"), environ={}, cwd=CWD, home=HOME)
+    return build_compose(
+        config, squid_conf=Path("/tmp/x/squid.conf"), dynamic_dir=Path("/tmp/x/dynamic"), environ={}, cwd=CWD, home=HOME
+    )
 
 
 def test_compose_isolates_agent_on_internal_network() -> None:
@@ -66,7 +68,7 @@ def test_compose_isolates_agent_on_internal_network() -> None:
     assert compose["networks"]["internal"]["internal"] is True
     assert agent["depends_on"] == [PROXY_SERVICE]
     assert proxy["image"] == "squid-img"
-    assert proxy["volumes"] == [f"/tmp/x/squid.conf:{SQUID_CONF_PATH}:ro,Z"]
+    assert proxy["volumes"][0] == f"/tmp/x/squid.conf:{SQUID_CONF_PATH}:ro,Z"
 
 
 def test_compose_points_agent_at_proxy() -> None:
@@ -109,6 +111,7 @@ def test_compose_pins_proxy_hosts() -> None:
     compose = build_compose(
         BASE,
         squid_conf=Path("/tmp/x/squid.conf"),
+        dynamic_dir=Path("/tmp/x/dynamic"),
         environ={},
         cwd=CWD,
         home=HOME,
@@ -121,3 +124,9 @@ def test_compose_pins_proxy_hosts() -> None:
 
 def test_compose_without_proxy_hosts_has_no_extra_hosts() -> None:
     assert "extra_hosts" not in _build(BASE)["services"][PROXY_SERVICE]
+
+
+def test_compose_mounts_dynamic_exceptions_read_only() -> None:
+    # A directory, not single files: those are replaced atomically, which a file bind mount would not follow
+    volumes = _build(_config())["services"][PROXY_SERVICE]["volumes"]
+    assert "/tmp/x/dynamic:/etc/squid/agent-sandbox:ro,Z" in volumes

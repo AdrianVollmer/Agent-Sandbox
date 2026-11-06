@@ -71,7 +71,10 @@ Notes:
   with normal network access (not through the proxy), and tagged
   `localhost/agent-sandbox:<hash>`. Old tags are not cleaned up;
   `podman image prune` takes care of them.
-- The compose file is written as JSON, which compose parses as YAML.
+- The compose file is written as JSON, which compose parses as YAML. Every
+  `$` in it is escaped as `$$`, so values from the config are taken literally
+  instead of being expanded from the host environment by compose. To pass a
+  host variable, use a bare `NAME` in `agent.env`.
 
 ## Allowing destinations at runtime
 

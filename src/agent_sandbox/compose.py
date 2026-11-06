@@ -8,6 +8,7 @@ from typing import Any
 
 from agent_sandbox.config import Config, ConfigError
 from agent_sandbox.squid import DYNAMIC_DIR_PATH
+from agent_sandbox.workspace import DEFAULT_WORKDIR, Mount, protected_volume_conflicts
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +61,28 @@ def resolve_env(entries: Iterable[str], environ: Mapping[str, str]) -> dict[str,
     return env
 
 
+def _check_workspace_volumes(volumes: Sequence[str], workdir: str, workspace: Mount) -> None:
+    """Reject volumes that would shadow the workspace or bypass its protection."""
+    for spec in volumes:
+        parts = spec.split(":")
+        target = parts[1] if len(parts) > 1 else parts[0]
+        if target.rstrip("/") == workdir.rstrip("/"):
+            raise ConfigError(
+                f"agent.volumes: {spec!r} mounts over the workspace at {workdir}, which is mounted automatically. "
+                "Remove it, and use `run --rw` for read-write access to the current directory"
+            )
+    if workspace.protected is None:
+        return
+    exact, parents = protected_volume_conflicts(volumes, workspace.protected)
+    if exact:
+        raise ConfigError(
+            f"agent.volumes: {', '.join(exact)} would give the agent direct access to {workspace.protected}, "
+            "bypassing the clone or read-only mount. Use `run --rw` if you want that"
+        )
+    for spec in parents:
+        log.warning("Volume %s contains %s, the agent can reach it through that mount", spec, workspace.protected)
+
+
 def build_compose(
     config: Config,
     *,
@@ -69,12 +92,13 @@ def build_compose(
     cwd: Path,
     home: Path,
     proxy_hosts: Mapping[str, Sequence[str]] | None = None,
+    workspace: Mount | None = None,
 ) -> dict[str, Any]:
     """Return the compose document as a dict.
 
     `dynamic_dir` holds the exceptions added while the session runs, see
     agent_sandbox.allowlist. `proxy_hosts` maps names to addresses pinned in
-    the proxy's /etc/hosts.
+    the proxy's /etc/hosts. `workspace` is mounted at `agent.workdir`.
     """
     agent = config.agent
     bad_keys = _PROTECTED_SERVICE_KEYS & agent.service.keys()
@@ -85,12 +109,19 @@ def build_compose(
 
     proxy_url = f"http://{PROXY_SERVICE}:{config.proxy.port}"
     proxy_env = {"HTTP_PROXY": proxy_url, "HTTPS_PROXY": proxy_url, "NO_PROXY": NO_PROXY}
+    volumes = [resolve_volume(v, cwd=cwd, home=home) for v in agent.volumes]
+    workdir = agent.workdir
+    if workspace is not None:
+        workdir = workdir or DEFAULT_WORKDIR
+        _check_workspace_volumes(volumes, workdir, workspace)
+        volumes = [*workspace.volumes, *volumes]
+        workdir = workspace.working_dir
     environment = {
         **proxy_env,
         **{k.lower(): v for k, v in proxy_env.items()},
+        **(workspace.env if workspace else {}),
         **resolve_env(agent.env, environ),
     }
-    volumes = [resolve_volume(v, cwd=cwd, home=home) for v in agent.volumes]
 
     agent_service: dict[str, Any] = {
         "image": agent.image_ref,
@@ -100,8 +131,8 @@ def build_compose(
     }
     if agent.command:
         agent_service["command"] = list(agent.command)
-    if agent.workdir:
-        agent_service["working_dir"] = agent.workdir
+    if workdir:
+        agent_service["working_dir"] = workdir
     if volumes:
         agent_service["volumes"] = volumes
     agent_service.update(agent.service)

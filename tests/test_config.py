@@ -6,11 +6,13 @@ import pytest
 from agent_sandbox.config import (
     DEFAULT_PROXY_IMAGE,
     ConfigError,
+    KrunConfig,
     config_search_paths,
     find_config,
     load_config,
     state_dir,
 )
+from tests.conftest import MINIMAL_CONFIG
 
 
 def test_search_paths_use_xdg_config_home() -> None:
@@ -241,3 +243,36 @@ def test_host_dns(write_config: Callable[..., Path]) -> None:
 def test_host_dns_must_be_bool(write_config: Callable[..., Path]) -> None:
     with pytest.raises(ConfigError, match=r"proxy\.host_dns: expected a boolean"):
         load_config(write_config('[agent]\nimage = "i"\n[proxy]\npresets = ["debian"]\nhost_dns = "yes"'))
+
+
+def test_runtime_defaults_to_engine_default(write_config: Callable[..., Path]) -> None:
+    agent = load_config(write_config()).agent
+    assert agent.runtime is None
+    assert not agent.uses_krun
+
+
+def test_krun_runtime(write_config: Callable[..., Path]) -> None:
+    content = MINIMAL_CONFIG.replace(
+        'image = "localhost/agent:latest"',
+        'image = "localhost/agent:latest"\nruntime = "krun"\nkrun = { cpus = 4, ram_mib = 4096 }',
+    )
+    agent = load_config(write_config(content)).agent
+    assert agent.uses_krun
+    assert agent.krun == KrunConfig(cpus=4, ram_mib=4096)
+
+
+@pytest.mark.parametrize(
+    ("agent", "message"),
+    [
+        ("krun = { cpus = 2 }", r"agent\.krun: only valid with runtime = 'krun'"),
+        ('runtime = "krun"\nkrun = { cpus = 0 }', r"agent\.krun\.cpus: must be between 1 and 16"),
+        ('runtime = "krun"\nkrun = { cpus = 17 }', r"agent\.krun\.cpus: must be between 1 and 16"),
+        ('runtime = "krun"\nkrun = { ram_mib = 128 }', r"agent\.krun\.ram_mib: must be more than 128"),
+        ('runtime = "krun"\nkrun = { memory = 1 }', r"agent\.krun: unknown key 'memory'"),
+        ("runtime = 1", r"agent\.runtime: expected a string"),
+    ],
+)
+def test_invalid_krun(write_config: Callable[..., Path], agent: str, message: str) -> None:
+    content = MINIMAL_CONFIG.replace('image = "localhost/agent:latest"', f'image = "i"\n{agent}')
+    with pytest.raises(ConfigError, match=message):
+        load_config(write_config(content))

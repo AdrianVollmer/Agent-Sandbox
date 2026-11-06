@@ -45,6 +45,7 @@ agent-sandbox run                 # configured command (e.g. a shell), else imag
 agent-sandbox run claude --dangerously-skip-permissions
 agent-sandbox run --rebuild       # rebuild the image from the Dockerfile first
 agent-sandbox run --engine docker
+agent-sandbox run --krun            # run the agent in a libkrun microVM
 agent-sandbox render              # print compose file and squid.conf, run nothing
 agent-sandbox presets             # list domain presets (claude-code, debian, pypi, uv, npm, jsr, ...)
 agent-sandbox -v run              # debug logging
@@ -74,6 +75,38 @@ Notes:
   `localhost/agent-sandbox:<hash>`. Old tags are not cleaned up;
   `podman image prune` takes care of them.
 - The compose file is written as JSON, which compose parses as YAML.
+
+## Running the agent in a microVM (libkrun)
+
+For a stronger boundary than a container, the agent can run in a
+[libkrun](https://github.com/containers/libkrun) microVM with its own kernel.
+This uses the `krun` OCI runtime, which is crun built with libkrun support
+(`crun-krun` on Fedora), and needs access to `/dev/kvm`.
+
+```toml
+[agent]
+runtime = "krun"
+# Optional, crun defaults to one vCPU per host CPU (max 16) and the
+# container's memory limit, or 1024 MiB without one
+krun = { cpus = 4, ram_mib = 4096 }
+```
+
+`agent-sandbox run --krun` does the same for a single run, and
+`agent-sandbox render --krun` shows the result. The proxy stays a normal
+container.
+
+Network isolation is unchanged: libkrun's default networking (TSI) opens the
+guest's sockets in the container's network namespace, which is only attached
+to the internal network, so the proxy is still the only way out. Volumes are
+shared with the guest via virtio-fs.
+
+Caveats:
+
+- Tested with podman only. With docker, `krun` must be registered as a runtime
+  in the daemon config.
+- Container hardening like `cap_drop` and `security_opt` constrains the VM
+  process on the host. Don't rely on it inside the guest, where the guest
+  kernel is the boundary.
 
 ## Allowing destinations at runtime
 

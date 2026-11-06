@@ -44,6 +44,11 @@ env = [
     # "NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt",
     # "REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt",
 ]
+# OCI runtime for the agent container. "krun" runs it in a libkrun microVM
+# (needs crun with libkrun support and /dev/kvm). Unset means the engine default.
+# runtime = "krun"
+# microVM size, only with runtime = "krun". crun picks defaults when unset.
+# krun = { cpus = 4, ram_mib = 4096 }
 # Extra flags for `<engine> compose run`.
 run_args = []
 

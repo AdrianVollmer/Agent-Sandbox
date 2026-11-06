@@ -115,8 +115,9 @@ def _prepare_project(config: "Config", engine: str, *, rebuild: bool) -> "tuple[
 @_CONFIG_OPTION
 @click.option("--engine", type=click.Choice(["podman", "docker"]), help="Override the configured engine.")
 @click.option("--rebuild", is_flag=True, help="Rebuild the agent image from `agent.build` even if it exists.")
+@click.option("--krun", is_flag=True, help='Run the agent in a libkrun microVM (sets `agent.runtime = "krun"`).')
 @click.argument("command", nargs=-1, type=click.UNPROCESSED)
-def run(config_path: Path | None, engine: str | None, rebuild: bool, command: tuple[str, ...]) -> None:
+def run(config_path: Path | None, engine: str | None, rebuild: bool, krun: bool, command: tuple[str, ...]) -> None:
     """Start the proxy and run COMMAND in the agent container.
 
     Without COMMAND, the configured command runs, or the image default if none
@@ -132,9 +133,13 @@ def run(config_path: Path | None, engine: str | None, rebuild: bool, command: tu
 
     log = logging.getLogger("agent_sandbox.cli")
     config = _load(config_path)
+    if krun:
+        config = _with_krun(config)
     command = command or config.agent.command
     try:
         engine = engines.detect_engine(engine or config.engine)
+        if config.agent.uses_krun:
+            engines.check_krun(engine)
     except ConfigError as e:
         raise click.UsageError(str(e)) from e
 
@@ -159,13 +164,24 @@ def run(config_path: Path | None, engine: str | None, rebuild: bool, command: tu
     raise SystemExit(code)
 
 
+def _with_krun(config: "Config") -> "Config":
+    from dataclasses import replace
+
+    from agent_sandbox.config import KRUN_RUNTIME
+
+    return replace(config, agent=replace(config.agent, runtime=KRUN_RUNTIME))
+
+
 @cli.command()
 @_CONFIG_OPTION
-def render(config_path: Path | None) -> None:
+@click.option("--krun", is_flag=True, help='Render as if `agent.runtime = "krun"` was set.')
+def render(config_path: Path | None, krun: bool) -> None:
     """Print the generated compose file and squid.conf without running anything."""
     import tempfile
 
     config = _load(config_path)
+    if krun:
+        config = _with_krun(config)
     with tempfile.TemporaryDirectory(prefix="agent-sandbox-") as tmp:
         compose_file = _write_project(config, Path(tmp))
         click.echo("# compose.yaml")

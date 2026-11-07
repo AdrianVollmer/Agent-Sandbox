@@ -13,7 +13,7 @@ from agent_sandbox.compose import (
     resolve_env,
     resolve_volume,
 )
-from agent_sandbox.config import AgentConfig, Config, ConfigError, ProxyConfig
+from agent_sandbox.config import AgentConfig, Config, ConfigError, KrunConfig, ProxyConfig
 
 CWD = Path("/work/project")
 HOME = Path("/home/u")
@@ -160,3 +160,25 @@ def test_compose_mounts_dynamic_exceptions_read_only() -> None:
     # A directory, not single files: those are replaced atomically, which a file bind mount would not follow
     volumes = _build(_config())["services"][PROXY_SERVICE]["volumes"]
     assert "/tmp/x/dynamic:/etc/squid/agent-sandbox:ro,Z" in volumes
+
+
+def test_compose_without_runtime_uses_engine_default() -> None:
+    agent = _build(_config())["services"][AGENT_SERVICE]
+    assert "runtime" not in agent
+    assert "annotations" not in agent
+
+
+def test_compose_krun_runtime_keeps_isolation() -> None:
+    compose = _build(_config(runtime="krun", krun=KrunConfig(cpus=2, ram_mib=2048)))
+    agent = compose["services"][AGENT_SERVICE]
+    assert agent["runtime"] == "krun"
+    assert agent["annotations"] == {"krun.cpus": "2", "krun.ram_mib": "2048"}
+    assert agent["networks"] == ["internal"]
+    # The proxy needs no VM
+    assert "runtime" not in compose["services"][PROXY_SERVICE]
+
+
+def test_compose_krun_without_sizes_has_no_annotations() -> None:
+    agent = _build(_config(runtime="krun"))["services"][AGENT_SERVICE]
+    assert agent["runtime"] == "krun"
+    assert "annotations" not in agent

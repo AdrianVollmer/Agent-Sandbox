@@ -104,6 +104,19 @@ def build_compose(
         agent_service["working_dir"] = agent.workdir
     if volumes:
         agent_service["volumes"] = volumes
+    if agent.runtime:
+        agent_service["runtime"] = agent.runtime
+    if agent.uses_krun:
+        # Read by crun's krun handler. Its default networking (TSI) opens the
+        # guest's sockets in the container's network namespace, so the VM
+        # stays on the internal network just like a plain container.
+        annotations = {}
+        if agent.krun.cpus is not None:
+            annotations["krun.cpus"] = str(agent.krun.cpus)
+        if agent.krun.ram_mib is not None:
+            annotations["krun.ram_mib"] = str(agent.krun.ram_mib)
+        if annotations:
+            agent_service["annotations"] = annotations
     agent_service.update(agent.service)
 
     proxy_service: dict[str, Any] = {

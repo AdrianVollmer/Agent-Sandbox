@@ -20,6 +20,8 @@ SYSTEM_CONFIG_DIR = Path("/etc")
 DEFAULT_PROXY_IMAGE = "docker.io/ubuntu/squid:latest"
 BUILD_IMAGE_REPO = "localhost/agent-sandbox"
 ENGINES = ("podman", "docker")
+# OCI runtime that runs the container in a libkrun microVM (crun built with libkrun)
+KRUN_RUNTIME = "krun"
 
 _DOMAIN_RE = re.compile(r"^\.?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]*[a-z0-9])?$", re.IGNORECASE)
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -62,6 +64,18 @@ class ProxyConfig:
 
 
 @dataclass(frozen=True)
+class KrunConfig:
+    """Size of the libkrun microVM. None leaves the choice to crun.
+
+    crun defaults to one vCPU per available host CPU (at most 16) and to the
+    container's memory limit, or 1024 MiB without one.
+    """
+
+    cpus: int | None = None
+    ram_mib: int | None = None
+
+
+@dataclass(frozen=True)
 class AgentConfig:
     """Settings for the container the agent runs in."""
 
@@ -74,6 +88,14 @@ class AgentConfig:
     env: tuple[str, ...] = ()
     run_args: tuple[str, ...] = ()
     service: Mapping[str, Any] = field(default_factory=dict)
+    # OCI runtime for the agent container, e.g. "krun" for a libkrun microVM
+    runtime: str | None = None
+    krun: KrunConfig = field(default_factory=KrunConfig)
+
+    @property
+    def uses_krun(self) -> bool:
+        """Return whether the agent runs in a libkrun microVM."""
+        return self.runtime == KRUN_RUNTIME
 
     @property
     def image_ref(self) -> str:
@@ -159,7 +181,21 @@ def parse_config(data: Mapping[str, Any], base_dir: Path | None = None) -> Confi
 def _parse_agent(data: Mapping[str, Any], base_dir: Path) -> AgentConfig:
     prefix = "agent."
     _reject_unknown_keys(
-        data, "agent", {"image", "build", "build_file", "command", "workdir", "volumes", "env", "run_args", "service"}
+        data,
+        "agent",
+        {
+            "image",
+            "build",
+            "build_file",
+            "command",
+            "workdir",
+            "volumes",
+            "env",
+            "run_args",
+            "service",
+            "runtime",
+            "krun",
+        },
     )
     env = _str_list(data, "env", prefix)
     for entry in env:
@@ -180,6 +216,10 @@ def _parse_agent(data: Mapping[str, Any], base_dir: Path) -> AgentConfig:
         except OSError as e:
             raise ConfigError(f"agent.build_file: cannot read {build_file}: {e}") from e
         log.debug("Read Dockerfile from %s", build_file)
+    runtime = _optional(data, "runtime", str, prefix) or None
+    krun_data = _optional(data, "krun", dict, prefix)
+    if krun_data is not None and runtime != KRUN_RUNTIME:
+        raise ConfigError(f"agent.krun: only valid with runtime = {KRUN_RUNTIME!r}")
     return AgentConfig(
         image=image,
         build=build,
@@ -190,7 +230,22 @@ def _parse_agent(data: Mapping[str, Any], base_dir: Path) -> AgentConfig:
         env=env,
         run_args=_str_list(data, "run_args", prefix),
         service=_optional(data, "service", dict, prefix) or {},
+        runtime=runtime,
+        krun=_parse_krun(krun_data or {}),
     )
+
+
+def _parse_krun(data: Mapping[str, Any]) -> KrunConfig:
+    prefix = "agent.krun."
+    _reject_unknown_keys(data, "agent.krun", {"cpus", "ram_mib"})
+    cpus = _optional(data, "cpus", int, prefix)
+    # crun's limits: vCPUs are a uint8 capped at 16, RAM at or below 128 MiB is ignored
+    if cpus is not None and not 1 <= cpus <= 16:
+        raise ConfigError(f"{prefix}cpus: must be between 1 and 16, got {cpus}")
+    ram_mib = _optional(data, "ram_mib", int, prefix)
+    if ram_mib is not None and ram_mib <= 128:
+        raise ConfigError(f"{prefix}ram_mib: must be more than 128, got {ram_mib}")
+    return KrunConfig(cpus=cpus, ram_mib=ram_mib)
 
 
 def _parse_proxy(data: Mapping[str, Any]) -> ProxyConfig:

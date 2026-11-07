@@ -330,3 +330,20 @@ def test_complete_revoke_without_matching_session(tmp_path: Path, monkeypatch: p
     # Completion must stay quiet instead of failing in the user's shell
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     assert _complete(["revoke"], "") == []
+
+
+def test_render_krun_flag_sets_runtime(write_config: Callable[..., Path]) -> None:
+    result = CliRunner().invoke(cli, ["render", "--krun", "--config", str(write_config())])
+    assert result.exit_code == 0, result.output
+    compose = json.loads(result.output.split("# squid.conf\n")[0].removeprefix("# compose.yaml\n"))
+    assert compose["services"]["agent"]["runtime"] == "krun"
+
+
+def test_run_krun_checks_kvm(
+    write_config: Callable[..., Path], fake_run: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("agent_sandbox.engine.KVM_DEVICE", tmp_path / "no-kvm")
+    result = CliRunner().invoke(cli, ["run", "--krun", "--config", str(write_config())])
+    assert result.exit_code == 2
+    assert "needs KVM" in result.output
+    assert "compose" not in fake_run

@@ -1,6 +1,7 @@
 """Building images and running the compose project with podman or docker."""
 
 import logging
+import os
 import shlex
 import shutil
 import subprocess
@@ -56,6 +57,24 @@ def detect_engine(preferred: str | None, which: Callable[[str], str | None] | No
             log.debug("Detected container engine %s", engine)
             return engine
     raise ConfigError("Neither podman nor docker found in PATH")
+
+
+KVM_DEVICE = Path("/dev/kvm")
+
+
+def check_krun(engine: str, kvm: Path | None = None, access: Callable[[Path, int], bool] = os.access) -> None:
+    """Fail early if the agent can't run in a libkrun microVM on this host.
+
+    libkrun needs KVM. Without it, the runtime fails with a less helpful
+    error only after the proxy has been started.
+    """
+    kvm = kvm or KVM_DEVICE
+    if engine != "podman":
+        log.warning("The krun runtime is only tested with podman, %s must have it registered", engine)
+    if not kvm.exists():
+        raise ConfigError(f"agent.runtime = 'krun' needs KVM, but {kvm} does not exist")
+    if not access(kvm, os.R_OK | os.W_OK):
+        raise ConfigError(f"agent.runtime = 'krun' needs KVM, but {kvm} is not accessible (add yourself to group kvm?)")
 
 
 def ensure_image(

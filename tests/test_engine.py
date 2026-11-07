@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from agent_sandbox.config import ConfigError
-from agent_sandbox.engine import ComposeProject, EngineError, detect_engine, ensure_image, reload_script
+from agent_sandbox.engine import ComposeProject, EngineError, check_krun, detect_engine, ensure_image, reload_script
 
 
 def test_detect_engine_prefers_podman() -> None:
@@ -179,3 +179,21 @@ def test_reload_script_fails_without_squid(tmp_path: Path) -> None:
     result = subprocess.run(["sh", "-c", reload_script(proc=str(tmp_path / "proc"))], capture_output=True, check=False)
     assert result.returncode == 1
     assert b"no squid process" in result.stderr
+
+
+def test_check_krun_needs_kvm(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="does not exist"):
+        check_krun("podman", kvm=tmp_path / "kvm")
+
+
+def test_check_krun_needs_kvm_access(tmp_path: Path) -> None:
+    kvm = tmp_path / "kvm"
+    kvm.touch()
+    with pytest.raises(ConfigError, match="not accessible"):
+        check_krun("podman", kvm=kvm, access=lambda _path, _mode: False)
+
+
+def test_check_krun_passes_with_kvm(tmp_path: Path) -> None:
+    kvm = tmp_path / "kvm"
+    kvm.touch()
+    check_krun("podman", kvm=kvm, access=lambda _path, _mode: True)

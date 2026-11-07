@@ -45,11 +45,22 @@ class Recorder:
 
 def test_run_returns_exit_code() -> None:
     project = ComposeProject(engine="podman", file=Path("/tmp/c.yaml"), name="sb")
-    recorder = Recorder([7])
+    recorder = Recorder([0, 7])
     code = project.run(run_args=("--user", "1000"), command=("bash",), runner=recorder)
     assert code == 7
     base = ["podman", "compose", "-f", "/tmp/c.yaml", "-p", "sb"]
-    assert recorder.calls == [[*base, "run", "--rm", "--user", "1000", "agent", "bash"]]
+    assert recorder.calls == [
+        [*base, "up", "-d", "proxy"],
+        [*base, "run", "--rm", "--no-deps", "--user", "1000", "agent", "bash"],
+    ]
+    assert recorder.kwargs[0]["stdout"] == subprocess.DEVNULL
+
+
+def test_run_proxy_start_fails() -> None:
+    project = ComposeProject(engine="podman", file=Path("/tmp/c.yaml"), name="sb")
+    recorder = Recorder([1])
+    with pytest.raises(EngineError, match="proxy"):
+        project.run(run_args=(), command=(), runner=recorder)
 
 
 def test_run_interrupted() -> None:

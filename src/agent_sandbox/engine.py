@@ -89,8 +89,25 @@ class ComposeProject:
         return [self.engine, "compose", "-f", str(self.file), "-p", self.name, *args]
 
     def run(self, *, run_args: Sequence[str], command: Sequence[str], runner: Runner = subprocess.run) -> int:
-        """Run the agent interactively and return its exit code."""
-        cmd = self._compose("run", "--rm", *run_args, AGENT_SERVICE, *command)
+        """Start the proxy quietly, then run the agent interactively and return its exit code.
+
+        Bringing the proxy up as part of `compose run`'s own dependency handling makes
+        podman print the new network's and container's IDs to stdout, cluttering the
+        terminal right before the agent's interactive session starts. Starting it
+        separately, with its output discarded, avoids that; `--no-deps` then stops
+        `run` from repeating the dependency check.
+        """
+        up = self._compose("up", "-d", PROXY_SERVICE)
+        log.debug("Running %s", up)
+        try:
+            result = runner(up, check=False, stdout=subprocess.DEVNULL)
+        except KeyboardInterrupt:
+            log.warning("Interrupted")
+            return _EXIT_INTERRUPTED
+        if result.returncode != 0:
+            raise EngineError(f"Starting {PROXY_SERVICE} failed with exit code {result.returncode}")
+
+        cmd = self._compose("run", "--rm", "--no-deps", *run_args, AGENT_SERVICE, *command)
         log.debug("Running %s", cmd)
         try:
             return runner(cmd, check=False).returncode

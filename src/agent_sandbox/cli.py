@@ -152,6 +152,8 @@ def run(config_path: Path | None, engine: str | None, rebuild: bool, command: tu
     try:
         registry.register(session)
         code = project.run(run_args=config.agent.run_args, command=command)
+    except engines.EngineError as e:
+        raise click.ClickException(str(e)) from e
     finally:
         registry.unregister(session.name)
         # Deletes tmp once the project is down, so no context manager here

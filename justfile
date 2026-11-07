@@ -52,6 +52,65 @@ bump level="patch":
     rm -rf dist
     uv sync
 
+# Build and install the `krun` OCI runtime (libkrunfw + libkrun + crun --with-libkrun) on Debian.
+# Not packaged for Debian, so this builds from source; needs sudo. See README's microVM section.
+# Pinned to known-compatible release tags: crun's krun handler targets libkrun's 1.x API, and
+# libkrun's `main` branch is an unreleased, API-incompatible 2.0 line.
+krun-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    libkrunfw_ref=v5.6.2
+    libkrun_ref=v1.19.8
+    crun_ref=1.30.1
+    if command -v krun >/dev/null; then
+        echo "krun already installed: $(command -v krun)" >&2
+        exit 0
+    fi
+    command -v cargo >/dev/null || { echo "Rust/cargo not found; install via https://rustup.rs first" >&2; exit 1; }
+    command -v rustup >/dev/null || { echo "rustup not found; libkrun's init binary needs a musl target, install Rust via https://rustup.rs first" >&2; exit 1; }
+    rustup target add "$(uname -m)-unknown-linux-musl"
+
+    sudo apt-get update
+    sudo apt-get install -y \
+        build-essential clang libclang-dev pkg-config patchelf python3-pyelftools \
+        flex bison libelf-dev \
+        autoconf automake libtool pkgconf libcap-dev libseccomp-dev libyajl-dev libjson-c-dev \
+        libsystemd-dev go-md2man git
+
+    # Persistent cache dir, not a mktemp one: a failed run can resume from here instead of
+    # re-cloning and recompiling (cargo, autoconf, make) from scratch every retry.
+    workdir="${XDG_CACHE_HOME:-$HOME/.cache}/agent-sandbox/krun-build"
+    mkdir -p "$workdir"
+    clone_or_reuse() {
+        local dir=$1 url=$2 ref=$3
+        if [ -d "$dir/.git" ]; then
+            echo "Reusing existing checkout at $dir" >&2
+        else
+            git clone --depth 1 --branch "$ref" "$url" "$dir"
+        fi
+    }
+
+    clone_or_reuse "$workdir/libkrunfw" https://github.com/containers/libkrunfw "$libkrunfw_ref"
+    make -C "$workdir/libkrunfw" -j"$(nproc)"
+    sudo make -C "$workdir/libkrunfw" install
+    sudo ldconfig
+
+    clone_or_reuse "$workdir/libkrun" https://github.com/containers/libkrun "$libkrun_ref"
+    make -C "$workdir/libkrun" -j"$(nproc)" BLK=1 NET=1 VHOST_USER=1
+    sudo make -C "$workdir/libkrun" BLK=1 NET=1 VHOST_USER=1 install
+    # libkrun's Makefile installs into $PREFIX/lib64, which Debian's dynamic linker doesn't
+    # search by default (only $PREFIX/lib and the multiarch dir are configured)
+    echo /usr/local/lib64 | sudo tee /etc/ld.so.conf.d/libkrun.conf >/dev/null
+    sudo ldconfig
+
+    clone_or_reuse "$workdir/crun" https://github.com/containers/crun "$crun_ref"
+    [ -f "$workdir/crun/Makefile" ] || (cd "$workdir/crun" && ./autogen.sh && ./configure --with-libkrun)
+    make -C "$workdir/crun" -j"$(nproc)"
+    sudo make -C "$workdir/crun" install
+
+    sudo ln -sf /usr/local/bin/crun /usr/local/bin/krun
+    echo "Installed $(krun --version | head -n1) as krun"
+
 # Run tests
 test:
     uv run pytest

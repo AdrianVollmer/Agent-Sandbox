@@ -7,7 +7,6 @@
 #   build_file = "Dockerfile"
 #   command = ["bash"]
 #   workdir = "/workspace"
-#   volumes = [".:/workspace:Z"]
 #   env = ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"]
 #
 #   [proxy]
@@ -18,7 +17,7 @@
 # this file does not COPY local files.
 #
 # Everything runs as root. With rootless podman, container root is your host
-# user, so files in the mounted workspace stay yours. With rootful docker they
+# user, so files in the workspace stay yours. With rootful docker they
 # end up owned by root on the host.
 
 # Node >= 22.19 is required by Pi, Debian trixie only ships 20

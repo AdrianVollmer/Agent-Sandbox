@@ -37,6 +37,8 @@ class Session:
     cwd: Path
     pid: int
     started: datetime
+    # ID of the workspace the agent works in, see agent_sandbox.workspace
+    workspace: str | None = None
 
     @property
     def short_id(self) -> str:
@@ -62,6 +64,7 @@ class Session:
             "cwd": str(self.cwd),
             "pid": self.pid,
             "started": self.started.isoformat(),
+            "workspace": self.workspace,
         }
         return json.dumps(data, indent=2) + "\n"
 
@@ -76,6 +79,7 @@ class Session:
             cwd=Path(data["cwd"]),
             pid=int(data["pid"]),
             started=datetime.fromisoformat(data["started"]),
+            workspace=data.get("workspace"),
         )
 
 

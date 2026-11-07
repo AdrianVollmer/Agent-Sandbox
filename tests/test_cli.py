@@ -1,7 +1,9 @@
 import json
 import os
+import subprocess
 import tempfile
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -13,6 +15,7 @@ from click.testing import CliRunner
 from agent_sandbox.cli import cli
 from agent_sandbox.engine import ComposeProject, EngineError
 from agent_sandbox.session import Session, SessionRegistry
+from agent_sandbox.workspace import WorkspaceStore
 from tests.conftest import MINIMAL_CONFIG
 
 
@@ -51,6 +54,10 @@ def fake_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
     monkeypatch.setattr("agent_sandbox.engine.ComposeProject.teardown_detached", _teardown)
     monkeypatch.setattr("agent_sandbox.engine.shutil.which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    # Not a git repository, so runs mount it read-only instead of cloning
+    work = tmp_path / "cwd"
+    work.mkdir()
+    monkeypatch.chdir(work)
     return seen
 
 
@@ -330,3 +337,148 @@ def test_complete_revoke_without_matching_session(tmp_path: Path, monkeypatch: p
     # Completion must stay quiet instead of failing in the user's shell
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     assert _complete(["revoke"], "") == []
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout
+
+
+@pytest.fixture
+def git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for key, value in {"NAME": "Test", "EMAIL": "test@example.com"}.items():
+        monkeypatch.setenv(f"GIT_AUTHOR_{key}", value)
+        monkeypatch.setenv(f"GIT_COMMITTER_{key}", value)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "--quiet", "-b", "main")
+    (repo / "f").write_text("x")
+    _git(repo, "add", "f")
+    _git(repo, "commit", "--quiet", "-m", "init")
+    monkeypatch.chdir(repo)
+    return repo
+
+
+def _store(tmp_path: Path) -> WorkspaceStore:
+    return WorkspaceStore(tmp_path / "state" / "agent-sandbox" / "workspaces")
+
+
+def test_run_in_git_repo_uses_clone(
+    write_config: Callable[..., Path], fake_run: dict[str, Any], git_repo: Path, tmp_path: Path
+) -> None:
+    result = CliRunner().invoke(cli, ["run", "--config", str(write_config())])
+    assert result.exit_code == 3, result.output
+    [ws] = _store(tmp_path).workspaces()
+    assert ws.mode == "clone"
+    agent = fake_run["compose"]["services"]["agent"]
+    assert f"{ws.repo}:/workspace:Z" in agent["volumes"]
+    assert not any(v.startswith(f"{git_repo}:") for v in agent["volumes"])
+    assert agent["working_dir"] == "/workspace"
+    assert agent["environment"]["SANDBOX_OUTBOX"] == "/exchange/out"
+    # Kept after the run, so the work can be fetched
+    assert ws.directory.is_dir()
+
+
+def test_run_outside_git_mounts_read_only_and_cleans_up(
+    write_config: Callable[..., Path], fake_run: dict[str, Any], tmp_path: Path
+) -> None:
+    result = CliRunner().invoke(cli, ["run", "--config", str(write_config())])
+    assert result.exit_code == 3, result.output
+    assert f"{Path.cwd()}:/workspace:ro,Z" in fake_run["compose"]["services"]["agent"]["volumes"]
+    # Nothing in the outbox, nothing to keep
+    assert _store(tmp_path).workspaces() == []
+
+
+def test_run_rw_mounts_read_write(
+    write_config: Callable[..., Path], fake_run: dict[str, Any], git_repo: Path, tmp_path: Path
+) -> None:
+    result = CliRunner().invoke(cli, ["run", "--rw", "--config", str(write_config())])
+    assert result.exit_code == 3, result.output
+    assert f"{git_repo}:/workspace:Z" in fake_run["compose"]["services"]["agent"]["volumes"]
+
+
+def test_run_keeps_read_only_workspace_with_outbox(
+    write_config: Callable[..., Path], fake_run: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _run(self: ComposeProject, *, run_args: tuple[str, ...], command: tuple[str, ...]) -> int:
+        [ws] = _store(tmp_path).workspaces()
+        (ws.outbox / "result").write_text("x")
+        return 0
+
+    monkeypatch.setattr("agent_sandbox.engine.ComposeProject.run", _run)
+    result = CliRunner().invoke(cli, ["run", "--config", str(write_config())])
+    assert result.exit_code == 0, result.output
+    [ws] = _store(tmp_path).workspaces()
+    assert ws.outbox_entries() == ["result"]
+
+
+@pytest.mark.parametrize("volume", [".:/workspace:Z", ".:/elsewhere"])
+def test_run_rejects_volumes_bypassing_workspace(
+    write_config: Callable[..., Path], fake_run: dict[str, Any], tmp_path: Path, volume: str
+) -> None:
+    config = MINIMAL_CONFIG.replace('image = "localhost/agent:latest"', f'image = "i"\nvolumes = ["{volume}"]')
+    result = CliRunner().invoke(cli, ["run", "--config", str(write_config(config))])
+    assert result.exit_code == 2, result.output
+    assert "compose" not in fake_run
+    # The workspace made for the failed run is gone again
+    assert _store(tmp_path).workspaces() == []
+
+
+def test_run_resume_reuses_workspace(
+    write_config: Callable[..., Path], fake_run: dict[str, Any], git_repo: Path, tmp_path: Path
+) -> None:
+    ws = _store(tmp_path).create("feed0001", git_repo)
+    result = CliRunner().invoke(cli, ["run", "--resume", "feed0001", "--config", str(write_config())])
+    assert result.exit_code == 3, result.output
+    assert f"{ws.repo}:/workspace:Z" in fake_run["compose"]["services"]["agent"]["volumes"]
+    assert [w.id for w in _store(tmp_path).workspaces()] == ["feed0001"]
+
+
+def test_run_resume_rejects_rw(write_config: Callable[..., Path], fake_run: dict[str, Any]) -> None:
+    result = CliRunner().invoke(cli, ["run", "--rw", "--resume", "x", "--config", str(write_config())])
+    assert result.exit_code == 2
+
+
+def test_workspace_commands(git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    ws = _store(tmp_path).create("feed0001", git_repo)
+    (ws.repo / "new").write_text("y")
+    _git(ws.repo, "add", "new")
+    _git(ws.repo, "commit", "--quiet", "-m", "agent work")
+    runner = CliRunner()
+
+    listing = runner.invoke(cli, ["workspaces"])
+    assert listing.exit_code == 0, listing.output
+    assert "feed0001" in listing.output
+    assert str(ws.repo) in listing.output
+
+    fetched = runner.invoke(cli, ["fetch"])
+    assert fetched.exit_code == 0, fetched.output
+    assert "sandbox/feed0001/agent" in fetched.output
+    assert _git(git_repo, "log", "--format=%s", "-1", "sandbox/feed0001/agent").strip() == "agent work"
+
+    payload = tmp_path / "payload.bin"
+    payload.write_bytes(b"\0")
+    put = runner.invoke(cli, ["put", str(payload)])
+    assert put.exit_code == 0, put.output
+    assert (ws.inbox / "payload.bin").exists()
+
+    (ws.outbox / "artifact").write_text("z")
+    got = runner.invoke(cli, ["get", "-o", str(tmp_path / "out")])
+    assert got.exit_code == 0, got.output
+    assert (tmp_path / "out" / "artifact").read_text() == "z"
+
+    discarded = runner.invoke(cli, ["discard", "feed0001"])
+    assert discarded.exit_code == 0, discarded.output
+    assert not ws.directory.exists()
+    assert _git(git_repo, "for-each-ref", "refs/remotes/sandbox/").strip() == ""
+
+
+def test_discard_refuses_workspace_in_use(live_session: Session, tmp_path: Path) -> None:
+    ws = _store(tmp_path).create("feed0001", tmp_path, read_write=True)
+    SessionRegistry(tmp_path / "state" / "agent-sandbox" / "sessions").register(replace(live_session, workspace=ws.id))
+    result = CliRunner().invoke(cli, ["discard", "feed0001"])
+    assert result.exit_code == 1
+    assert "in use" in result.output
+    assert ws.directory.exists()

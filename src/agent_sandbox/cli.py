@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from agent_sandbox.config import Config
     from agent_sandbox.engine import ComposeProject
     from agent_sandbox.session import Session, SessionRegistry
+    from agent_sandbox.workspace import Mount, Workspace, WorkspaceStore
 
 _CONFIG_OPTION = click.option(
     "-c",
@@ -42,7 +43,7 @@ def _load(config_path: Path | None) -> "Config":
         raise click.UsageError(str(e)) from e
 
 
-def _write_project(config: "Config", directory: Path) -> Path:
+def _write_project(config: "Config", directory: Path, workspace: "Mount | None" = None) -> Path:
     """Write compose file and squid.conf to `directory`, return the compose file path."""
     import json
     import os
@@ -71,6 +72,7 @@ def _write_project(config: "Config", directory: Path) -> Path:
             cwd=Path.cwd(),
             home=Path.home(),
             proxy_hosts=proxy_hosts,
+            workspace=workspace,
         )
     except ConfigError as e:
         raise click.UsageError(str(e)) from e
@@ -82,9 +84,10 @@ def _write_project(config: "Config", directory: Path) -> Path:
     return compose_file
 
 
-def _prepare_project(config: "Config", engine: str, *, rebuild: bool) -> "tuple[ComposeProject, Path]":
+def _prepare_project(
+    config: "Config", engine: str, *, rebuild: bool, name: str, workspace: "Mount"
+) -> "tuple[ComposeProject, Path]":
     """Build the image if needed and write the project to a new temporary directory."""
-    import secrets
     import shutil
     import tempfile
 
@@ -98,9 +101,7 @@ def _prepare_project(config: "Config", engine: str, *, rebuild: bool) -> "tuple[
             context = tmp / "build"
             context.mkdir()
             engines.ensure_image(engine, config.agent.image_ref, config.agent.build, context=context, rebuild=rebuild)
-        project = engines.ComposeProject(
-            engine=engine, file=_write_project(config, tmp), name=f"{PROJECT_PREFIX}{secrets.token_hex(4)}"
-        )
+        project = engines.ComposeProject(engine=engine, file=_write_project(config, tmp, workspace), name=name)
     except BaseException as e:
         shutil.rmtree(tmp, ignore_errors=True)
         if isinstance(e, engines.EngineError):
@@ -115,22 +116,44 @@ def _prepare_project(config: "Config", engine: str, *, rebuild: bool) -> "tuple[
 @_CONFIG_OPTION
 @click.option("--engine", type=click.Choice(["podman", "docker"]), help="Override the configured engine.")
 @click.option("--rebuild", is_flag=True, help="Rebuild the agent image from `agent.build` even if it exists.")
+@click.option("--rw", is_flag=True, help="Mount the current directory read-write instead of working in a clone.")
+@click.option(
+    "--resume",
+    "resume_id",
+    metavar="ID",
+    shell_complete=lambda *a: _complete_workspace(*a),
+    help="Continue in an existing workspace (see `workspaces`).",
+)
 @click.argument("command", nargs=-1, type=click.UNPROCESSED)
-def run(config_path: Path | None, engine: str | None, rebuild: bool, command: tuple[str, ...]) -> None:
+def run(
+    config_path: Path | None,
+    engine: str | None,
+    rebuild: bool,
+    rw: bool,
+    resume_id: str | None,
+    command: tuple[str, ...],
+) -> None:
     """Start the proxy and run COMMAND in the agent container.
 
-    Without COMMAND, the configured command runs, or the image default if none
-    is configured. Example: `agent-sandbox run claude --dangerously-skip-permissions`.
+    Inside a git repository, the agent works in a clone of it, see `fetch` to
+    get its commits. Elsewhere, the current directory is mounted read-only
+    unless --rw is given. Without COMMAND, the configured command runs, or
+    the image default if none is configured. Example: `agent-sandbox run
+    claude --dangerously-skip-permissions`.
     """
     import logging
     import os
+    import secrets
     from datetime import datetime
 
     from agent_sandbox import engine as engines
     from agent_sandbox.config import ConfigError, state_dir
-    from agent_sandbox.session import Session
+    from agent_sandbox.session import PROJECT_PREFIX, Session
+    from agent_sandbox.workspace import DEFAULT_WORKDIR, WorkspaceError
 
     log = logging.getLogger("agent_sandbox.cli")
+    if rw and resume_id:
+        raise click.UsageError("--rw and --resume cannot be combined, the workspace keeps its mode")
     config = _load(config_path)
     command = command or config.agent.command
     try:
@@ -138,7 +161,25 @@ def run(config_path: Path | None, engine: str | None, rebuild: bool, command: tu
     except ConfigError as e:
         raise click.UsageError(str(e)) from e
 
-    project, tmp = _prepare_project(config, engine, rebuild=rebuild)
+    store = _workspaces()
+    short_id = secrets.token_hex(4)
+    try:
+        if resume_id:
+            workspace = store.get(resume_id)
+            _check_not_in_use(workspace)
+        else:
+            workspace = store.create(short_id, Path.cwd(), read_write=rw)
+    except WorkspaceError as e:
+        raise click.ClickException(str(e)) from e
+    try:
+        mount = workspace.mount(config.agent.workdir or DEFAULT_WORKDIR)
+        project, tmp = _prepare_project(
+            config, engine, rebuild=rebuild, name=f"{PROJECT_PREFIX}{short_id}", workspace=mount
+        )
+    except BaseException:
+        if not resume_id:
+            store.discard(workspace)
+        raise
     session = Session(
         name=project.name,
         engine=engine,
@@ -146,6 +187,7 @@ def run(config_path: Path | None, engine: str | None, rebuild: bool, command: tu
         cwd=Path.cwd(),
         pid=os.getpid(),
         started=datetime.now().astimezone(),
+        workspace=workspace.id,
     )
     registry = _registry()
     log.info("Starting %s with %s compose", project.name, engine)
@@ -156,7 +198,32 @@ def run(config_path: Path | None, engine: str | None, rebuild: bool, command: tu
         registry.unregister(session.name)
         # Deletes tmp once the project is down, so no context manager here
         project.teardown_detached(log_file=state_dir(os.environ) / "teardown.log", cleanup=tmp)
+        _report_workspace(store, workspace, keep=bool(resume_id))
     raise SystemExit(code)
+
+
+def _report_workspace(store: "WorkspaceStore", workspace: "Workspace", *, keep: bool) -> None:
+    """Tell the user how to get at the agent's work, or drop a workspace with nothing in it."""
+    import logging
+
+    from agent_sandbox.workspace import CLONE
+
+    log = logging.getLogger("agent_sandbox.cli")
+    outbox = workspace.outbox_entries()
+    if workspace.mode != CLONE and not outbox and not keep:
+        store.discard(workspace)
+        return
+    if workspace.mode == CLONE:
+        log.info(
+            "The agent's work is in workspace %s. Fetch it with `agent-sandbox fetch %s`, then review "
+            "`git log -p HEAD..%s`",
+            workspace.id,
+            workspace.id,
+            workspace.agent_ref,
+        )
+    if outbox:
+        log.info("Outbox: %s. Copy it out with `agent-sandbox get -w %s`", " ".join(outbox), workspace.id)
+    log.info("Remove the workspace with `agent-sandbox discard %s` when done", workspace.id)
 
 
 @cli.command()
@@ -181,6 +248,42 @@ def presets() -> None:
 
     for name, domains in sorted(PRESETS.items()):
         click.echo(f"{click.style(name, bold=True)}: {' '.join(domains)}")
+
+
+def _workspaces() -> "WorkspaceStore":
+    import os
+
+    from agent_sandbox.config import state_dir
+    from agent_sandbox.workspace import WorkspaceStore
+
+    return WorkspaceStore(state_dir(os.environ) / "workspaces")
+
+
+def _select_workspace(workspace_id: str | None) -> "Workspace":
+    from agent_sandbox.workspace import WorkspaceError
+
+    try:
+        return _workspaces().select(workspace_id, Path.cwd())
+    except WorkspaceError as e:
+        raise click.ClickException(str(e)) from e
+
+
+def _check_not_in_use(workspace: "Workspace") -> None:
+    from agent_sandbox.workspace import WorkspaceError
+
+    for session in _registry().sessions():
+        if session.workspace == workspace.id:
+            raise WorkspaceError(f"Workspace {workspace.id} is in use by session {session.short_id}")
+
+
+def _complete_workspace(_ctx: click.Context, _param: click.Parameter, incomplete: str) -> "list[CompletionItem]":
+    from click.shell_completion import CompletionItem
+
+    return [
+        CompletionItem(w.id, help=f"{w.mode} {w.source}")
+        for w in _workspaces().workspaces()
+        if w.id.startswith(incomplete)
+    ]
 
 
 def _registry() -> "SessionRegistry":
@@ -242,6 +345,8 @@ def sessions() -> None:
     for session in running:
         started = session.started.astimezone().strftime("%Y-%m-%d %H:%M")
         click.echo(f"{click.style(session.short_id, bold=True)}  {started}  {session.cwd}")
+        if session.workspace:
+            click.echo(f"  workspace: {session.workspace}")
         if entries := session.allowlist.entries():
             click.echo(f"  allowed: {' '.join(entries)}")
 
@@ -318,3 +423,134 @@ def revoke(session_name: str | None, destinations: tuple[str, ...]) -> None:
     New connections are refused right away, open ones stay up.
     """
     _change_allowlist(session_name, destinations, add=False)
+
+
+_WORKSPACE_OPTION = click.option(
+    "-w",
+    "--workspace",
+    "workspace_id",
+    metavar="ID",
+    shell_complete=_complete_workspace,
+    help="Workspace to act on (see `workspaces`). Default: the only one, else the only one for this directory.",
+)
+
+
+@cli.command()
+def workspaces() -> None:
+    """List workspaces: clones the agent worked in and the exchange folders."""
+    from agent_sandbox.workspace import CLONE
+
+    found = _workspaces().workspaces()
+    if not found:
+        click.echo("No workspaces")
+    in_use = {s.workspace: s.short_id for s in _registry().sessions() if s.workspace}
+    for workspace in found:
+        created = workspace.created.astimezone().strftime("%Y-%m-%d %H:%M")
+        running = f"  (session {in_use[workspace.id]})" if workspace.id in in_use else ""
+        click.echo(
+            f"{click.style(workspace.id, bold=True)}  {created}  {workspace.mode:5}  {workspace.source}{running}"
+        )
+        if workspace.mode == CLONE:
+            click.echo(f"  clone:  {workspace.repo}")
+        click.echo(f"  inbox:  {workspace.inbox}")
+        outbox = workspace.outbox_entries()
+        click.echo(f"  outbox: {workspace.outbox} ({len(outbox)} entries)")
+
+
+@cli.command()
+@click.argument("workspace_id", metavar="[ID]", required=False, shell_complete=_complete_workspace)
+def fetch(workspace_id: str | None) -> None:
+    """Fetch the branches of a clone into the repository it was made from.
+
+    They end up as remote-tracking branches under sandbox/ID/, the agent's
+    own branch as sandbox/ID/agent. Nothing is checked out or merged.
+    """
+    from agent_sandbox import workspace as ws
+
+    workspace = _select_workspace(workspace_id)
+    try:
+        refs = ws.fetch(workspace)
+    except ws.WorkspaceError as e:
+        raise click.ClickException(str(e)) from e
+    for ref in refs:
+        click.echo(ref.removeprefix("refs/remotes/"))
+    if workspace.base:
+        click.echo(
+            f"Review with `git log -p {workspace.base[:12]}..{workspace.agent_ref}`, "
+            f"merge with `git merge {workspace.agent_ref}`",
+            err=True,
+        )
+
+
+@cli.command()
+@click.argument("workspace_ids", metavar="ID...", nargs=-1, required=True, shell_complete=_complete_workspace)
+def discard(workspace_ids: tuple[str, ...]) -> None:
+    """Delete workspaces with their clone and exchange folders.
+
+    Branches fetched from them are deleted too, merged commits stay.
+    """
+    from agent_sandbox.workspace import WorkspaceError
+
+    store = _workspaces()
+    try:
+        selected = [store.get(i) for i in workspace_ids]
+        for workspace in selected:
+            _check_not_in_use(workspace)
+    except WorkspaceError as e:
+        raise click.ClickException(str(e)) from e
+    for workspace in selected:
+        refs = store.discard(workspace)
+        click.echo(f"discarded: {workspace.id}" + (f" ({len(refs)} fetched branches deleted)" if refs else ""))
+
+
+@cli.command()
+@_WORKSPACE_OPTION
+@click.argument("paths", nargs=-1, required=True, type=click.Path(path_type=Path, exists=True))
+def put(workspace_id: str | None, paths: tuple[Path, ...]) -> None:
+    """Copy files or directories into a workspace's inbox.
+
+    The agent sees them read-only under $SANDBOX_INBOX (/exchange/in), right
+    away if it is running.
+    """
+    from agent_sandbox import workspace as ws
+
+    workspace = _select_workspace(workspace_id)
+    try:
+        names = ws.put(workspace, paths)
+    except (ws.WorkspaceError, OSError) as e:
+        raise click.ClickException(str(e)) from e
+    for name in names:
+        click.echo(f"{ws.INBOX_PATH}/{name}")
+
+
+@cli.command()
+@_WORKSPACE_OPTION
+@click.option(
+    "-o",
+    "--output",
+    "dest",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=Path(),
+    show_default=True,
+    help="Directory to copy to.",
+)
+@click.option("--keep-mode", is_flag=True, help="Keep executable bits, which are dropped by default.")
+@click.argument("names", nargs=-1)
+def get(workspace_id: str | None, dest: Path, keep_mode: bool, names: tuple[str, ...]) -> None:
+    """Copy NAMES (default: everything) from a workspace's outbox.
+
+    The agent writes them to $SANDBOX_OUTBOX (/exchange/out). Treat them as
+    untrusted: symlinks are skipped and executable bits are dropped unless
+    --keep-mode is given.
+    """
+    from agent_sandbox import workspace as ws
+
+    workspace = _select_workspace(workspace_id)
+    try:
+        copied = ws.get(workspace, names, dest, keep_mode=keep_mode)
+    except (ws.WorkspaceError, OSError) as e:
+        raise click.ClickException(str(e)) from e
+    if not copied:
+        click.echo("Nothing copied")
+    for path in copied:
+        click.echo(path)

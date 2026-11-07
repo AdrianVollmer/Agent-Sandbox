@@ -43,6 +43,8 @@ agent-sandbox run                 # configured command (e.g. a shell), else imag
 agent-sandbox run claude --dangerously-skip-permissions
 agent-sandbox run --rebuild       # rebuild the image from the Dockerfile first
 agent-sandbox run --engine docker
+agent-sandbox run --rw              # mount the current directory read-write, no clone
+agent-sandbox fetch               # get the agent's commits, see Workspace
 agent-sandbox render              # print compose file and squid.conf, run nothing
 agent-sandbox presets             # list domain presets (claude-code, debian, pypi, uv, npm, jsr, ...)
 agent-sandbox -v run              # debug logging
@@ -75,6 +77,65 @@ Notes:
   `$` in it is escaped as `$$`, so values from the config are taken literally
   instead of being expanded from the host environment by compose. To pass a
   host variable, use a bare `NAME` in `agent.env`.
+
+## Workspace
+
+Inside a git repository, the agent does not get the repository itself. `run`
+clones it (`git clone --no-hardlinks`) to
+`$XDG_STATE_HOME/agent-sandbox/workspaces/<ID>/repo`, checks out a new branch
+`agent` at your current commit, carries over uncommitted changes to tracked
+files, and mounts the clone read-write at `agent.workdir` (default
+`/workspace`). Untracked files are not copied.
+
+So nothing the agent writes reaches your repository directly: not your git
+hooks or config, not ignored files like `.envrc` or `.venv`. To take its
+work:
+
+```sh
+agent-sandbox fetch [ID]               # branches of the clone -> sandbox/ID/*
+git log -p HEAD..sandbox/ID/agent      # review
+git merge sandbox/ID/agent             # or rebase, cherry-pick, ...
+agent-sandbox discard ID               # delete the clone and the fetched branches
+agent-sandbox run --resume ID          # or keep working in the same clone
+```
+
+`fetch` copies commits and refs only. It checks nothing out and runs none of
+the clone's hooks. Still review the diff before merging, in particular
+changes to `.gitmodules`, `.gitattributes` and anything you execute (build
+scripts, CI config).
+
+If the current directory is not in a git repository, or cloning fails
+(e.g. no commits yet), it is mounted read-only. `run --rw` mounts it
+read-write instead and skips the clone, which is the only way to give the
+agent direct write access. Volumes in the config that would give writable
+access to the current directory are rejected.
+
+### Exchanging files
+
+Each workspace has two folders for files that don't belong in git, such as
+binaries or data:
+
+- inbox: `/exchange/in` (`$SANDBOX_INBOX`), read-only for the agent
+- outbox: `/exchange/out` (`$SANDBOX_OUTBOX`), written by the agent
+
+```sh
+agent-sandbox put model.bin data/      # copy into the inbox, visible right away
+agent-sandbox get [NAME...] -o out/    # copy from the outbox (default: all)
+agent-sandbox workspaces               # IDs, modes and the folders' host paths
+```
+
+`put` and `get` take `-w ID` and otherwise pick the only workspace, or the
+only one for the current directory. Files from the outbox are untrusted:
+`get` skips symlinks and drops executable and setuid bits unless
+`--keep-mode` is given. Two folders instead of one shared one, so that the
+agent can't swap out what you gave it.
+
+Workspaces stay after the run until you `discard` them. Read-only and
+read-write workspaces with an empty outbox are removed right away.
+
+Rootful docker leaves the clone and outbox owned by root on the host; git then
+refuses to fetch from the clone ("dubious ownership") and `discard` can't
+delete it. Rootless podman doesn't have this problem.
 
 ## Allowing destinations at runtime
 

@@ -20,11 +20,14 @@ image = "localhost/claude-code:latest"
 # """
 # Default command when `agent-sandbox run` gets none. Unset means the image default.
 command = ["bash"]
+# Where the workspace is mounted (default /workspace): a clone of the current
+# git repository, or the current directory itself, see the README. Don't add a
+# volume for it.
 workdir = "/workspace"
 # Relative and ~ paths are resolved against the current directory and $HOME.
-# Bare names are named volumes and persist across runs.
+# Bare names are named volumes and persist across runs. Writable mounts of the
+# current directory are rejected, they would bypass the clone.
 volumes = [
-    ".:/workspace:Z",
     "~/.claude:/root/.claude:Z",
     # Host CA bundle, e.g. for a TLS-inspecting corporate network. Squid only
     # tunnels HTTPS, so the agent's tools are the ones that must trust the CA.

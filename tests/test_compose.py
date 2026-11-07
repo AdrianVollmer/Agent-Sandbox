@@ -9,6 +9,7 @@ from agent_sandbox.compose import (
     PROXY_SERVICE,
     SQUID_CONF_PATH,
     build_compose,
+    escape_interpolation,
     resolve_env,
     resolve_volume,
 )
@@ -53,10 +54,39 @@ def _config(**agent: Any) -> Config:
     return replace(BASE, agent=replace(BASE.agent, **agent))
 
 
-def _build(config: Config) -> dict[str, Any]:
+def _build(config: Config, environ: dict[str, str] | None = None) -> dict[str, Any]:
     return build_compose(
-        config, squid_conf=Path("/tmp/x/squid.conf"), dynamic_dir=Path("/tmp/x/dynamic"), environ={}, cwd=CWD, home=HOME
+        config,
+        squid_conf=Path("/tmp/x/squid.conf"),
+        dynamic_dir=Path("/tmp/x/dynamic"),
+        environ=environ or {},
+        cwd=CWD,
+        home=HOME,
     )
+
+
+def test_escape_interpolation() -> None:
+    value = {"a": "p$ss", "b": ["$HOME", "${X}", 3, True, None], "c$": {"d": "$$"}}
+    assert escape_interpolation(value) == {
+        "a": "p$$ss",
+        "b": ["$$HOME", "$${X}", 3, True, None],
+        "c$": {"d": "$$$$"},
+    }
+
+
+def test_compose_escapes_dollar_signs() -> None:
+    config = _config(
+        command=("sh", "-c", "echo $HOME"),
+        volumes=("/data/$dir:/d",),
+        env=("GREETING=pa$word", "FROM_HOST"),
+        service={"labels": ["x=$Y"]},
+    )
+    agent = _build(config, environ={"FROM_HOST": "a${b}"})["services"][AGENT_SERVICE]
+    assert agent["command"] == ["sh", "-c", "echo $$HOME"]
+    assert agent["volumes"] == ["/data/$$dir:/d"]
+    assert agent["labels"] == ["x=$$Y"]
+    assert agent["environment"]["GREETING"] == "pa$$word"
+    assert agent["environment"]["FROM_HOST"] == "a$${b}"
 
 
 def test_compose_isolates_agent_on_internal_network() -> None:

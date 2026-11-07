@@ -125,4 +125,23 @@ def build_compose(
     if names := named_volumes(volumes):
         # A fixed name keeps the volume stable across our randomly named projects
         compose["volumes"] = {name: {"name": name} for name in names}
-    return compose
+    return escape_interpolation(compose)
+
+
+def escape_interpolation(value: Any) -> Any:
+    """Return `value` with every `$` in string values doubled.
+
+    Compose substitutes `$VAR` and `${VAR}` in the file from the host
+    environment, which would silently change values taken literally from the
+    config, such as a password containing `$`. `$$` is compose's escape for a
+    literal `$`. Keys are left alone: docker compose does not interpolate
+    them, so escaping would corrupt them, and the ones we generate never
+    contain `$`.
+    """
+    if isinstance(value, str):
+        return value.replace("$", "$$")
+    if isinstance(value, dict):
+        return {k: escape_interpolation(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [escape_interpolation(v) for v in value]
+    return value
